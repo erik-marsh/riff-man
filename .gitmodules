@@ -1,0 +1,6 @@
+[submodule "thirdparty/clay"]
+	path = thirdparty/clay
+	url = https://github.com/nicbarker/clay.git
+[submodule "thirdparty/raylib"]
+	path = thirdparty/raylib
+	url = https://github.com/raysan5/raylib.git
