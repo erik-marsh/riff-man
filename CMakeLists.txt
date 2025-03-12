@@ -7,7 +7,13 @@ add_subdirectory(thirdparty/raylib)
 
 add_executable(riff-man main.cpp)
 target_compile_features(riff-man PRIVATE cxx_std_20)
-target_compile_options(riff-man PRIVATE -Wall -Wextra -Wpedantic -Wdisabled-optimization -Wno-missing-field-initializers -O2)
+target_compile_options(riff-man PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wdisabled-optimization
+    -Wno-missing-field-initializers
+    -O2)
 target_include_directories(riff-man PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/raylib/src/
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/clay/
