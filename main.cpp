@@ -7,8 +7,10 @@
 #include <cmath>
 #include <cstring>
 #include <format>
+#include <ranges>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // Custom raylib functions for string view text buffers 
 // Raysan has explicitly stated he will not be supporting these.
@@ -196,13 +198,23 @@ ScrollbarData scrollbarData = {0};
 
 bool debugEnabled = false;
 
-struct PlaybackState {
-    float currTime;
-    float length;
+struct Song {
+    Music buffer;
+    std::string name;
+    float length;  // in seconds
 };
 
-Clay_RenderCommandArray TestLayout(PlaybackState& state) {
-    static constexpr Clay_ElementDeclaration songEntry{
+struct PlaybackState {
+    Song* currSong;
+    float currTime;
+};
+
+struct InputState {
+    Song* hoveredSong;
+};
+
+Clay_RenderCommandArray TestLayout(PlaybackState& state, InputState& input, std::vector<Song>& songs) {
+    static constexpr Clay_ElementDeclaration songEntryBase{
         .layout = {
             .sizing = { .width = CLAY_SIZING_GROW(0),
                         .height = CLAY_SIZING_FIXED(75) },
@@ -218,23 +230,15 @@ Clay_RenderCommandArray TestLayout(PlaybackState& state) {
         .fontSize = 24
     };
 
-    using namespace std::literals::string_view_literals;
-    static constexpr std::array titles = {
-        "Foreground Eclipse - White Wind"sv,
-        "Zazen Boys - Riff Man"sv,
-        "Cult of Fire - Kali Ma"sv,
-        "Foreground Eclipse - White Wind"sv,
-        "Zazen Boys - Riff Man"sv,
-        "Cult of Fire - Kali Ma"sv,
-        "Foreground Eclipse - White Wind"sv,
-        "Zazen Boys - Riff Man"sv,
-        "Cult of Fire - Kali Ma"sv,
-        "Foreground Eclipse - White Wind"sv,
-        "Zazen Boys - Riff Man"sv,
-        "Cult of Fire - Kali Ma"sv,
-        "end of container"sv,
-        // TODO: need CJK font
-        // "銀杏BOYZ - あの娘に1ミリでもちょっかいかけたら殺す"
+    static auto MakeSongEntry = [&input](Song& song, int songIndex) {
+        Clay_ElementDeclaration config = songEntryBase;
+        config.id = CLAY_IDI("Song", songIndex);
+        config.userData = &song;
+        CLAY(config) {
+            CLAY_TEXT(ToClayString(song.name), &bodyText);
+            if (Clay_Hovered())
+                input.hoveredSong = &song;
+        }
     };
 
     static const Clay_ElementDeclaration rootLayout{
@@ -264,39 +268,40 @@ Clay_RenderCommandArray TestLayout(PlaybackState& state) {
         .backgroundColor = { 35, 35, 35, 255 }
     };
 
+    input.hoveredSong = nullptr;
     Clay_BeginLayout();
     // TODO: eventually I will want a small gap between the two panels
     CLAY(rootLayout) {
         CLAY(navigationLayout) {
-            for (auto str : titles) {
-                Clay_String clayStr = ToClayString(str);
-                CLAY(songEntry) { CLAY_TEXT(clayStr, &bodyText); }
-            }
+            for (auto [i, song] : std::views::enumerate(songs))
+                MakeSongEntry(song, i);
         }
         CLAY(controlLayout) {
-            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0) },
-                   .childAlignment = { .x = CLAY_ALIGN_X_CENTER,
-                                       .y = CLAY_ALIGN_Y_CENTER } },
-                   /*.backgroundColor = { 255, 0, 0, 255 }*/ }) {
+            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0),
+                                           .height = CLAY_SIZING_GROW(0) },
+                               .childAlignment = { .x = CLAY_ALIGN_X_CENTER,
+                                                   .y = CLAY_ALIGN_Y_CENTER } } }) {
                 TimeFormat(state.currTime, playbackTime);
                 CLAY_TEXT(ToClayString(playbackTime), &bodyText);
             }
-            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(0.65f), .height = CLAY_SIZING_GROW(0) },
-                   .childAlignment = { .x = CLAY_ALIGN_X_CENTER,
-                                       .y = CLAY_ALIGN_Y_CENTER } },
-                   /*.backgroundColor = { 0, 255, 0, 255 }*/ }) {
-                CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(0.95f), .height = CLAY_SIZING_FIXED(25) } },
+            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(0.65f),
+                                           .height = CLAY_SIZING_GROW(0) },
+                               .childAlignment = { .x = CLAY_ALIGN_X_CENTER,
+                                                   .y = CLAY_ALIGN_Y_CENTER } } }) {
+                CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(0.95f),
+                                               .height = CLAY_SIZING_FIXED(25) } },
                        .backgroundColor = { 0, 0, 0, 255 }, }) {
-                    float playbackTimePercent = state.currTime / state.length;
-                    CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(playbackTimePercent), .height = CLAY_SIZING_GROW(0) } },
+                    float playbackTimePercent = state.currTime / state.currSong->length;
+                    CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(playbackTimePercent),
+                                       .height = CLAY_SIZING_GROW(0) } },
                            .backgroundColor = { 255, 255, 255, 255 }, }) {}
                 }
             }
-            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0) },
-                   .childAlignment = { .x = CLAY_ALIGN_X_CENTER,
-                                       .y = CLAY_ALIGN_Y_CENTER } },
-                   /*.backgroundColor = { 0, 0, 255, 255 }*/ }) {
-                TimeFormat(state.length, trackLength);
+            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0),
+                                           .height = CLAY_SIZING_GROW(0) },
+                               .childAlignment = { .x = CLAY_ALIGN_X_CENTER,
+                                                   .y = CLAY_ALIGN_Y_CENTER } } }) {
+                TimeFormat(state.currSong->length, trackLength);
                 CLAY_TEXT(ToClayString(trackLength), &bodyText);
             }
         }
@@ -438,7 +443,15 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts) {
 ////////////////////////////////////////////////////////////////////////////////
 
 void ClayError(Clay_ErrorData errorData) {
-    printf("%s", errorData.errorText.chars);
+    printf("%s\n", errorData.errorText.chars);
+}
+
+void ChangeSong(PlaybackState& state, Song& song) {
+    if (state.currSong)
+        StopMusicStream(state.currSong->buffer);
+    state.currSong = &song;
+    state.currTime = 0.0f;
+    PlayMusicStream(state.currSong->buffer);
 }
 
 int main() {
@@ -458,8 +471,24 @@ int main() {
     InitWindow(1024, 768, "[Riff Man]");
     InitAudioDevice();
 
-    Music music = LoadMusicStream("test.mp3");
-    PlayMusicStream(music);
+    std::vector<Song> songs(3);
+    songs[0].buffer = LoadMusicStream("white-wind.mp3");
+    songs[0].length = GetMusicTimeLength(songs[0].buffer);
+    songs[0].name = "Foreground Eclipse - White Wind";
+    songs[1].buffer = LoadMusicStream("riff-man.mp3");
+    songs[1].length = GetMusicTimeLength(songs[1].buffer);
+    songs[1].name = "Zazen Boys - Riff Man";
+    songs[2].buffer = LoadMusicStream("kali-ma.mp3");
+    songs[2].length = GetMusicTimeLength(songs[2].buffer);
+    songs[2].name = "Cult of Fire - Kali Ma";
+
+    PlaybackState state;
+    ChangeSong(state, songs[0]);
+
+    InputState input;
+    input.hoveredSong = nullptr;
+
+    // PlayMusicStream(state.currSong->buffer);
     SetTargetFPS(60);
 
     Font fonts[1];
@@ -467,17 +496,13 @@ int main() {
     SetTextureFilter(fonts[0].texture, TEXTURE_FILTER_BILINEAR);
     Clay_SetMeasureTextFunction(Raylib_MeasureText, fonts);
 
-    double totalLayoutTime = 0.0;
-    int totalIterations = 0;
-
-    PlaybackState state;
-    state.currTime = 0.0f;
-    state.length = GetMusicTimeLength(music);
+    // double totalLayoutTime = 0.0;
+    // int totalIterations = 0;
 
     while (!WindowShouldClose()) {
-        UpdateMusicStream(music);
+        UpdateMusicStream(state.currSong->buffer);
 
-        state.currTime = GetMusicTimePlayed(music);
+        state.currTime = GetMusicTimePlayed(state.currSong->buffer);
 
         Vector2 mouseWheelDelta = GetMouseWheelMoveV();
         float mouseWheelX = mouseWheelDelta.x;
@@ -496,6 +521,18 @@ int main() {
                 static_cast<float>(GetScreenHeight()) });
         if (!IsMouseButtonDown(0)) {
             scrollbarData.mouseDown = false;
+        }
+
+        // if (Clay_PointerOver(CLAY_IDI("Song", 2)))
+        //     printf("gotcha!\n");
+
+        // if (Clay_PointerOver(CLAY_ID("Song")))
+        //     printf("more gotcha!\n");
+
+        if (input.hoveredSong) {
+            printf("%s\n", input.hoveredSong->name.c_str());
+            if (IsMouseButtonDown(0))
+                ChangeSong(state, *input.hoveredSong);
         }
 
         if (IsMouseButtonDown(0) &&
@@ -523,12 +560,12 @@ int main() {
 
         Clay_UpdateScrollContainers(true, Clay_Vector2{mouseWheelX, mouseWheelY}, GetFrameTime());
 
-        double currentTime = GetTime();
-        Clay_RenderCommandArray renderCommands = TestLayout(state);
-        double layoutTime = (GetTime() - currentTime) * 1000.0 * 1000.0;
-        totalLayoutTime += layoutTime;
-        totalIterations++;
-        printf("layout time: %f us\n", layoutTime); 
+        // double currentTime = GetTime();
+        Clay_RenderCommandArray renderCommands = TestLayout(state, input, songs);
+        // double layoutTime = (GetTime() - currentTime) * 1000.0 * 1000.0;
+        // totalLayoutTime += layoutTime;
+        // totalIterations++;
+        // printf("layout time: %f us\n", layoutTime); 
 
         BeginDrawing();
         ClearBackground(BLACK);
@@ -536,9 +573,11 @@ int main() {
         EndDrawing();
     }
 
-    printf("Avg layout time: %f us\n", totalLayoutTime / totalIterations);
+    // printf("Avg layout time: %f us\n", totalLayoutTime / totalIterations);
 
-    UnloadMusicStream(music);
+    UnloadMusicStream(songs[0].buffer);
+    UnloadMusicStream(songs[1].buffer);
+    UnloadMusicStream(songs[2].buffer);
     CloseAudioDevice();
     CloseWindow();
     return 0;

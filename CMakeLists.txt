@@ -6,7 +6,7 @@ set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
 add_subdirectory(thirdparty/raylib)
 
 add_executable(riff-man main.cpp)
-target_compile_features(riff-man PRIVATE cxx_std_20)
+target_compile_features(riff-man PRIVATE cxx_std_23)
 target_compile_options(riff-man PRIVATE
     -Wall
     -Wextra
