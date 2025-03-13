@@ -32,38 +32,39 @@
 //
 // Our Clay renderer only needs to use DrawTextEx, fortunately.
 
+// TODO: I don't think this implementation matches the one in DrawTextEx{N}
 Clay_Dimensions Raylib_MeasureText(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData) {
-    // Measure string size for Font
-    Clay_Dimensions textSize = { 0 };
+    Clay_Dimensions textSize{ .width = 0.0f, .height = 0.0f };
+
+    Font* fonts = reinterpret_cast<Font*>(userData);
+    Font fontToUse = fonts[config->fontId];
+
+    // Font failed to load, likely the fonts are in the wrong place relative to the execution dir
+    if (!fontToUse.glyphs)
+        return textSize;
 
     float maxTextWidth = 0.0f;
     float lineTextWidth = 0;
 
-    float textHeight = config->fontSize;
-    Font* fonts = (Font*)userData;
-    Font fontToUse = fonts[config->fontId];
-    // Font failed to load, likely the fonts are in the wrong place relative to the execution dir
-    if (!fontToUse.glyphs) return textSize;
-
-    float scaleFactor = config->fontSize/static_cast<float>(fontToUse.baseSize);
-
-    for (int i = 0; i < text.length; ++i)
-    {
+    for (int i = 0; i < text.length; ++i) {
         if (text.chars[i] == '\n') {
-            maxTextWidth = fmax(maxTextWidth, lineTextWidth);
+            maxTextWidth = std::fmax(maxTextWidth, lineTextWidth);
             lineTextWidth = 0;
             continue;
         }
-        int index = text.chars[i] - 32;
-        if (fontToUse.glyphs[index].advanceX != 0) lineTextWidth += fontToUse.glyphs[index].advanceX;
-        else lineTextWidth += (fontToUse.recs[index].width + fontToUse.glyphs[index].offsetX);
+
+        const int index = text.chars[i] - 32;
+        const auto& glyph = fontToUse.glyphs[index];
+        if (glyph.advanceX != 0)
+            lineTextWidth += glyph.advanceX;
+        else
+            lineTextWidth += fontToUse.recs[index].width + glyph.offsetX;
     }
 
-    maxTextWidth = fmax(maxTextWidth, lineTextWidth);
-
+    const float scaleFactor = config->fontSize / static_cast<float>(fontToUse.baseSize);
+    maxTextWidth = std::fmax(maxTextWidth, lineTextWidth);
     textSize.width = maxTextWidth * scaleFactor;
-    textSize.height = textHeight;
-
+    textSize.height = config->fontSize;
     return textSize;
 }
 
@@ -78,38 +79,46 @@ void DrawTextExN(Font font, const char* text, int textLen,
 
     float textOffsetX = 0.0f;
     float textOffsetY = 0.0f;
-    float scaleFactor = fontSize / font.baseSize;
+    const float scaleFactor = fontSize / font.baseSize;
 
     for (int i = 0; i < textLen; ) {
         int codepointByteCount = 0;
-        int codepoint = GetCodepointNext(&text[i], &codepointByteCount);
-        int index = GetGlyphIndex(font, codepoint);
+        const int codepoint = GetCodepointNext(&text[i], &codepointByteCount);
+        const int index = GetGlyphIndex(font, codepoint);
 
         if (codepoint == '\n') {
             textOffsetX = 0.0f;
-            textOffsetY += (fontSize + textLineSpacing);
+            textOffsetY += fontSize + textLineSpacing;
         } else {
             if ((codepoint != ' ') && (codepoint != '\t')) {
                 Vector2 glyphPos{ position.x + textOffsetX, position.y + textOffsetY };
                 DrawTextCodepoint(font, codepoint, glyphPos, fontSize, tint);
             }
 
-            if (font.glyphs[index].advanceX == 0)
-                textOffsetX += static_cast<float>(font.recs[index].width * scaleFactor + spacing);
+            float baseOffset;
+            if (font.glyphs[index].advanceX != 0)
+                baseOffset = static_cast<float>(font.glyphs[index].advanceX);
             else
-                textOffsetX += static_cast<float>(font.glyphs[index].advanceX * scaleFactor + spacing);
+                baseOffset = font.recs[index].width;
+            textOffsetX += baseOffset * scaleFactor + spacing;
         }
 
         i += codepointByteCount;
     }
 }
 
-constexpr Color ClayToRaylibColor(Clay_Color& color) {
+constexpr Color ClayToRaylibColor(const Clay_Color& color) {
+    static constexpr auto Transform = [](float value) -> unsigned char {
+        if (value > 255.0f) return static_cast<unsigned char>(255);
+        if (value < 0.0f) return static_cast<unsigned char>(0);
+        return static_cast<unsigned char>(std::roundf(value));
+    };
+
     return Color{
-        .r = static_cast<unsigned char>(std::roundf(color.r)),
-        .g = static_cast<unsigned char>(std::roundf(color.g)),
-        .b = static_cast<unsigned char>(std::roundf(color.b)),
-        .a = static_cast<unsigned char>(std::roundf(color.a))
+        .r = Transform(color.r),
+        .g = Transform(color.g),
+        .b = Transform(color.b),
+        .a = Transform(color.a)
     };
 };
 
@@ -174,7 +183,6 @@ void TimeFormat(float seconds, StringBuffer<N>& dest) {
     dest.size = res.size;
 }
 
-// TODO: write into a static string buffer using a printf or format_to_n
 std::string TimeFormat(float seconds) {
     const int asInt = static_cast<int>(seconds);
     const int ss = asInt % 60;
@@ -194,7 +202,7 @@ typedef struct
     bool mouseDown;
 } ScrollbarData;
 
-ScrollbarData scrollbarData = {0};
+ScrollbarData scrollbar = {0};
 
 bool debugEnabled = false;
 
@@ -222,6 +230,8 @@ Clay_RenderCommandArray TestLayout(PlaybackState& state, InputState& input, std:
             .childAlignment = { .x = CLAY_ALIGN_X_CENTER,
                                 .y = CLAY_ALIGN_Y_CENTER } },
         .backgroundColor = { 100, 100, 100, 255 },
+        .cornerRadius = { 10, 10, 10, 10},
+        // .border = { .color = { 255, 0, 0, 255 }, .width = { 15, 15, 15, 15, 0 },  },
     };
 
     // Clay internally caches font configs, so this isn't quite the best approach
@@ -312,36 +322,39 @@ Clay_RenderCommandArray TestLayout(PlaybackState& state, InputState& input, std:
 // Mostly just copied from the example
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts) {
     for (int j = 0; j < renderCommands.length; j++) {
-        Clay_RenderCommand* renderCommand = Clay_RenderCommandArray_Get(&renderCommands, j);
-        const Clay_BoundingBox& bb = renderCommand->boundingBox;
-        switch (renderCommand->commandType) {
+        const Clay_RenderCommand* const cmd = Clay_RenderCommandArray_Get(&renderCommands, j);
+        const Clay_BoundingBox& bb = cmd->boundingBox;
+
+        switch (cmd->commandType) {
             case CLAY_RENDER_COMMAND_TYPE_TEXT: {
-                Clay_TextRenderData* textData = &renderCommand->renderData.text;
-                DrawTextExN(fonts[textData->fontId],
-                            textData->stringContents.chars,
-                            textData->stringContents.length,
+                const Clay_TextRenderData& text = cmd->renderData.text;
+                DrawTextExN(fonts[text.fontId],
+                            text.stringContents.chars,
+                            text.stringContents.length,
                             Vector2{bb.x, bb.y},
-                            static_cast<float>(textData->fontSize),
-                            static_cast<float>(textData->letterSpacing),
-                            ClayToRaylibColor(textData->textColor));
+                            static_cast<float>(text.fontSize),
+                            static_cast<float>(text.letterSpacing),
+                            ClayToRaylibColor(text.textColor));
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_IMAGE: {
-                Texture2D imageTexture = *reinterpret_cast<Texture2D*>(renderCommand->renderData.image.imageData);
-                Clay_Color tintColor = renderCommand->renderData.image.backgroundColor;
-                if (tintColor.r == 0 && tintColor.g == 0 && tintColor.b == 0 && tintColor.a == 0) {
-                    tintColor = Clay_Color{ 255, 255, 255, 255 };
-                }
-                DrawTextureEx(
-                    imageTexture,
-                    Vector2{bb.x, bb.y},
-                    0,
-                    bb.width / static_cast<float>(imageTexture.width),
-                    ClayToRaylibColor(tintColor));
+                const auto& image = cmd->renderData.image;
+                const Vector2 origin{ bb.x, bb.y };
+                const Texture2D imageTexture = *reinterpret_cast<Texture2D*>(image.imageData);
+                const float scale = bb.width / static_cast<float>(imageTexture.width);
+                Color tint = ClayToRaylibColor(image.backgroundColor);
+                if (tint.r == 0 && tint.g == 0 && tint.b == 0 && tint.a == 0)
+                    tint = Color{ 255, 255, 255, 255 };
+                DrawTextureEx(imageTexture, origin, 0, scale, tint);
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
-                BeginScissorMode(static_cast<int>(std::roundf(bb.x)), static_cast<int>(std::roundf(bb.y)), static_cast<int>(std::roundf(bb.width)), static_cast<int>(std::roundf(bb.height)));
+                // omitting the rounding does in fact cause issues here
+                const int bbx = static_cast<int>(std::roundf(bb.x));
+                const int bby = static_cast<int>(std::roundf(bb.y));
+                const int bbw = static_cast<int>(std::roundf(bb.width));
+                const int bbh = static_cast<int>(std::roundf(bb.height));
+                BeginScissorMode(bbx, bby, bbw, bbh); 
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END: {
@@ -349,85 +362,87 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts) {
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_RECTANGLE: {
-                Clay_RectangleRenderData *config = &renderCommand->renderData.rectangle;
-                if (config->cornerRadius.topLeft > 0) {
-                    float radius = (config->cornerRadius.topLeft * 2) / static_cast<float>((bb.width > bb.height) ? bb.height : bb.width);
-                    DrawRectangleRounded(Rectangle{ bb.x, bb.y, bb.width, bb.height }, radius, 8, ClayToRaylibColor(config->backgroundColor));
+                const auto& config = cmd->renderData.rectangle;
+                const Rectangle rect{ bb.x, bb.y, bb.width, bb.height };
+                const Color color = ClayToRaylibColor(config.backgroundColor);
+
+                if (config.cornerRadius.topLeft > 0) {
+                    const float minDim = bb.width > bb.height ? bb.height : bb.width;
+                    const float radius = (config.cornerRadius.topLeft * 2) / minDim;
+                    DrawRectangleRounded(rect, radius, 10, color);
                 } else {
-                    DrawRectangle(bb.x, bb.y, bb.width, bb.height, ClayToRaylibColor(config->backgroundColor));
+                    DrawRectangleRec(rect, color);
                 }
                 break;
             }
+            // NOTE: borders are drawn IN the main rect, not outside of it
             case CLAY_RENDER_COMMAND_TYPE_BORDER: {
-                Clay_BorderRenderData *config = &renderCommand->renderData.border;
-                // Left border
-                if (config->width.left > 0) {
-                    DrawRectangle(
-                        static_cast<int>(std::roundf(bb.x)),
-                        static_cast<int>(std::roundf(bb.y + config->cornerRadius.topLeft)),
-                        static_cast<int>(config->width.left),
-                        static_cast<int>(std::roundf(bb.height - config->cornerRadius.topLeft - config->cornerRadius.bottomLeft)),
-                        ClayToRaylibColor(config->color));
+                const auto& border = cmd->renderData.border;
+                const Color color = ClayToRaylibColor(border.color);
+
+                if (border.width.left > 0) {
+                    const Rectangle rect{
+                        bb.x,
+                        bb.y + border.cornerRadius.topLeft,
+                        static_cast<float>(border.width.left),
+                        bb.height - border.cornerRadius.topLeft - border.cornerRadius.bottomLeft };
+                    DrawRectangleRec(rect, color);
                 }
-                // Right border
-                if (config->width.right > 0) {
-                    DrawRectangle(static_cast<int>(std::roundf(bb.x + bb.width - config->width.right)),
-                                  static_cast<int>(std::roundf(bb.y + config->cornerRadius.topRight)),
-                                  static_cast<int>(config->width.right),
-                                  static_cast<int>(std::roundf(bb.height - config->cornerRadius.topRight - config->cornerRadius.bottomRight)),
-                                  ClayToRaylibColor(config->color));
+                if (border.width.right > 0) {
+                    const Rectangle rect{
+                        bb.x + bb.width - border.width.right,
+                        bb.y + border.cornerRadius.topRight,
+                        static_cast<float>(border.width.right),
+                        bb.height - border.cornerRadius.topRight - border.cornerRadius.bottomRight };
+                    DrawRectangleRec(rect, color);
                 }
-                // Top border
-                if (config->width.top > 0) {
-                    DrawRectangle(static_cast<int>(std::roundf(bb.x + config->cornerRadius.topLeft)),
-                                  static_cast<int>(std::roundf(bb.y)),
-                                  static_cast<int>(std::roundf(bb.width - config->cornerRadius.topLeft - config->cornerRadius.topRight)),
-                                  static_cast<int>(config->width.top),
-                                  ClayToRaylibColor(config->color));
+                if (border.width.top > 0) {
+                    const Rectangle rect{
+                        bb.x + border.cornerRadius.topLeft,
+                        bb.y,
+                        bb.width - border.cornerRadius.topLeft - border.cornerRadius.topRight,
+                        static_cast<float>(border.width.top) };
+                    DrawRectangleRec(rect, color);
                 }
-                // Bottom border
-                if (config->width.bottom > 0) {
-                    DrawRectangle(static_cast<int>(std::roundf(bb.x + config->cornerRadius.bottomLeft)),
-                                  static_cast<int>(std::roundf(bb.y + bb.height - config->width.bottom)),
-                                  static_cast<int>(std::roundf(bb.width - config->cornerRadius.bottomLeft - config->cornerRadius.bottomRight)),
-                                  static_cast<int>(config->width.bottom),
-                                  ClayToRaylibColor(config->color));
+                if (border.width.bottom > 0) {
+                    const Rectangle rect{
+                        bb.x + border.cornerRadius.bottomLeft,
+                        bb.y + bb.height - border.width.bottom,
+                        bb.width - border.cornerRadius.bottomLeft - border.cornerRadius.bottomRight,
+                        static_cast<float>(border.width.bottom) };
+                    DrawRectangleRec(rect, color);
                 }
-                if (config->cornerRadius.topLeft > 0) {
-                    DrawRing(Vector2{std::roundf(bb.x + config->cornerRadius.topLeft), std::roundf(bb.y + config->cornerRadius.topLeft) },
-                             std::roundf(config->cornerRadius.topLeft - config->width.top),
-                             config->cornerRadius.topLeft,
-                             180,
-                             270,
-                             10,
-                             ClayToRaylibColor(config->color));
+                if (border.cornerRadius.topLeft > 0) {
+                    const Vector2 center{
+                        bb.x + border.cornerRadius.topLeft,
+                        bb.y + border.cornerRadius.topLeft };
+                    const float innerRadius = border.cornerRadius.topLeft - border.width.top;
+                    const float outerRadius = border.cornerRadius.topLeft;
+                    DrawRing(center, innerRadius, outerRadius, 180.0f, 270.0f, 10, color);
                 }
-                if (config->cornerRadius.topRight > 0) {
-                    DrawRing(Vector2{std::roundf(bb.x + bb.width - config->cornerRadius.topRight), std::roundf(bb.y + config->cornerRadius.topRight) },
-                             std::roundf(config->cornerRadius.topRight - config->width.top),
-                             config->cornerRadius.topRight,
-                             270,
-                             360,
-                             10,
-                             ClayToRaylibColor(config->color));
+                if (border.cornerRadius.topRight > 0) {
+                    const Vector2 center{
+                        bb.x + bb.width - border.cornerRadius.topRight,
+                        bb.y + border.cornerRadius.topRight };
+                    const float innerRadius = border.cornerRadius.topRight - border.width.top;
+                    const float outerRadius = border.cornerRadius.topRight;
+                    DrawRing(center, innerRadius, outerRadius, 270.0f, 360.0f, 10, color);
                 }
-                if (config->cornerRadius.bottomLeft > 0) {
-                    DrawRing(Vector2{std::roundf(bb.x + config->cornerRadius.bottomLeft), std::roundf(bb.y + bb.height - config->cornerRadius.bottomLeft) },
-                             std::roundf(config->cornerRadius.bottomLeft - config->width.top),
-                             config->cornerRadius.bottomLeft,
-                             90,
-                             180,
-                             10,
-                             ClayToRaylibColor(config->color));
+                if (border.cornerRadius.bottomLeft > 0) {
+                    const Vector2 center{
+                        bb.x + border.cornerRadius.bottomLeft,
+                        bb.y + bb.height - border.cornerRadius.bottomLeft };
+                    const float innerRadius = border.cornerRadius.bottomLeft - border.width.top;
+                    const float outerRadius = border.cornerRadius.bottomLeft;
+                    DrawRing(center, innerRadius, outerRadius, 90.0f, 180.0f, 10, color);
                 }
-                if (config->cornerRadius.bottomRight > 0) {
-                    DrawRing(Vector2{std::roundf(bb.x + bb.width - config->cornerRadius.bottomRight), std::roundf(bb.y + bb.height - config->cornerRadius.bottomRight) },
-                             std::roundf(config->cornerRadius.bottomRight - config->width.bottom),
-                             config->cornerRadius.bottomRight,
-                             0.1,
-                             90,
-                             10,
-                             ClayToRaylibColor(config->color));
+                if (border.cornerRadius.bottomRight > 0) {
+                    const Vector2 center{
+                        bb.x + bb.width - border.cornerRadius.bottomRight,
+                        bb.y + bb.height - border.cornerRadius.bottomRight };
+                    const float innerRadius = border.cornerRadius.bottomRight - border.width.bottom;
+                    const float outerRadius = border.cornerRadius.bottomRight;
+                    DrawRing(center, innerRadius, outerRadius, 0.1f, 90.0f, 10, color);
                 }
                 break;
             }
@@ -488,92 +503,68 @@ int main() {
     InputState input;
     input.hoveredSong = nullptr;
 
-    // PlayMusicStream(state.currSong->buffer);
     SetTargetFPS(60);
 
     Font fonts[1];
     fonts[0] = LoadFontEx("resources/Roboto-Regular.ttf", 48, 0, 400);
     SetTextureFilter(fonts[0].texture, TEXTURE_FILTER_BILINEAR);
-    Clay_SetMeasureTextFunction(Raylib_MeasureText, fonts);
 
-    // double totalLayoutTime = 0.0;
-    // int totalIterations = 0;
+    Clay_SetMeasureTextFunction(Raylib_MeasureText, fonts);
 
     while (!WindowShouldClose()) {
         UpdateMusicStream(state.currSong->buffer);
-
         state.currTime = GetMusicTimePlayed(state.currSong->buffer);
-
-        Vector2 mouseWheelDelta = GetMouseWheelMoveV();
-        float mouseWheelX = mouseWheelDelta.x;
-        float mouseWheelY = mouseWheelDelta.y;
 
         if (IsKeyPressed(KEY_D)) {
             debugEnabled = !debugEnabled;
             Clay_SetDebugModeEnabled(debugEnabled);
         }
-        //----------------------------------------------------------------------------------
-        // Handle scroll containers
+
         Clay_Vector2 mousePosition = RaylibToClayVector2(GetMousePosition());
-        Clay_SetPointerState(mousePosition, IsMouseButtonDown(0) && !scrollbarData.mouseDown);
+        Clay_SetPointerState(mousePosition, IsMouseButtonDown(0) && !scrollbar.mouseDown);
         Clay_SetLayoutDimensions(Clay_Dimensions{
                 static_cast<float>(GetScreenWidth()),
                 static_cast<float>(GetScreenHeight()) });
-        if (!IsMouseButtonDown(0)) {
-            scrollbarData.mouseDown = false;
-        }
 
-        // if (Clay_PointerOver(CLAY_IDI("Song", 2)))
-        //     printf("gotcha!\n");
+        if (!IsMouseButtonDown(0))
+            scrollbar.mouseDown = false;
 
-        // if (Clay_PointerOver(CLAY_ID("Song")))
-        //     printf("more gotcha!\n");
+        if (input.hoveredSong && IsMouseButtonDown(0))
+            ChangeSong(state, *input.hoveredSong);
 
-        if (input.hoveredSong) {
-            printf("%s\n", input.hoveredSong->name.c_str());
-            if (IsMouseButtonDown(0))
-                ChangeSong(state, *input.hoveredSong);
-        }
-
-        if (IsMouseButtonDown(0) &&
-                !scrollbarData.mouseDown &&
-                Clay_PointerOver(Clay__HashString(CLAY_STRING("ScrollBar"), 0, 0))) {
-            Clay_ScrollContainerData scrollContainerData = Clay_GetScrollContainerData(Clay__HashString(CLAY_STRING("MainContent"), 0, 0));
-            scrollbarData.clickOrigin = mousePosition;
-            scrollbarData.positionOrigin = *scrollContainerData.scrollPosition;
-            scrollbarData.mouseDown = true;
-        } else if (scrollbarData.mouseDown) {
-            Clay_ScrollContainerData scrollContainerData = Clay_GetScrollContainerData(Clay__HashString(CLAY_STRING("MainContent"), 0, 0));
-            if (scrollContainerData.contentDimensions.height > 0) {
+        if (IsMouseButtonDown(0) && !scrollbar.mouseDown && Clay_PointerOver(CLAY_ID("ScrollBar"))) {
+            Clay_ScrollContainerData data = Clay_GetScrollContainerData(CLAY_ID("MainContent"));
+            scrollbar.clickOrigin = mousePosition;
+            scrollbar.positionOrigin = *data.scrollPosition;
+            scrollbar.mouseDown = true;
+        } else if (scrollbar.mouseDown) {
+            Clay_ScrollContainerData data = Clay_GetScrollContainerData(CLAY_ID("MainContent"));
+            if (data.contentDimensions.height > 0) {
                 Clay_Vector2 ratio{
-                    scrollContainerData.contentDimensions.width / scrollContainerData.scrollContainerDimensions.width,
-                    scrollContainerData.contentDimensions.height / scrollContainerData.scrollContainerDimensions.height,
+                    data.contentDimensions.width / data.scrollContainerDimensions.width,
+                    data.contentDimensions.height / data.scrollContainerDimensions.height,
                 };
-                if (scrollContainerData.config.vertical) {
-                    scrollContainerData.scrollPosition->y = scrollbarData.positionOrigin.y + (scrollbarData.clickOrigin.y - mousePosition.y) * ratio.y;
+                if (data.config.vertical) {
+                    const float delta = scrollbar.clickOrigin.y - mousePosition.y;
+                    data.scrollPosition->y = scrollbar.positionOrigin.y + delta * ratio.y;
                 }
-                if (scrollContainerData.config.horizontal) {
-                    scrollContainerData.scrollPosition->x = scrollbarData.positionOrigin.x + (scrollbarData.clickOrigin.x - mousePosition.x) * ratio.x;
+                if (data.config.horizontal) {
+                    const float delta = scrollbar.clickOrigin.x - mousePosition.x;
+                    data.scrollPosition->x = scrollbar.positionOrigin.x + delta * ratio.x;
                 }
             }
         }
 
-        Clay_UpdateScrollContainers(true, Clay_Vector2{mouseWheelX, mouseWheelY}, GetFrameTime());
+        Clay_Vector2 mouseWheelDelta = RaylibToClayVector2(GetMouseWheelMoveV());
+        Clay_UpdateScrollContainers(true, mouseWheelDelta, GetFrameTime());
 
-        // double currentTime = GetTime();
         Clay_RenderCommandArray renderCommands = TestLayout(state, input, songs);
-        // double layoutTime = (GetTime() - currentTime) * 1000.0 * 1000.0;
-        // totalLayoutTime += layoutTime;
-        // totalIterations++;
-        // printf("layout time: %f us\n", layoutTime); 
 
         BeginDrawing();
         ClearBackground(BLACK);
         Clay_Raylib_Render(renderCommands, fonts);
         EndDrawing();
     }
-
-    // printf("Avg layout time: %f us\n", totalLayoutTime / totalIterations);
 
     UnloadMusicStream(songs[0].buffer);
     UnloadMusicStream(songs[1].buffer);
