@@ -14,19 +14,37 @@
 
 #include "Renderer.hpp"
 
-struct Song {
-    Music buffer;
+// parallel to what will be the database entry for a song
+// basing this schema partially off of https://schema.org/MusicRecording
+// TODO: i have no idea if we want this to be an owning struct or a reference struct
+//       i will assume owning until further notice
+enum class AudioFormat {
+    MP3,
+    OPUS
+};
+
+struct SongEntry {
+    // data for program logic
+    long id;
+    std::string filename;
+    AudioFormat fileFormat;
+    
+    // file metadata
     std::string name;
-    float length;  // in seconds
+    std::string byArtist;
+    // std::string inAlbum;
+    // float duration;  // in seconds
 };
 
 struct PlaybackState {
-    Song* currSong;
+    Music audioBuffer;
+    const SongEntry* metadata;
+    float duration;
     float currTime;
 };
 
 struct HoverInput {
-    Song* song;
+    long songId;
 };
 
 struct StringBuffer {
@@ -87,7 +105,7 @@ void TimeFormat(float seconds, StringBuffer& dest) {
     dest.size = res.size;
 }
 
-Clay_RenderCommandArray MakeLayout(PlaybackState& state, HoverInput& hovers, std::vector<Song>& songs) {
+Clay_RenderCommandArray MakeLayout(PlaybackState& state, HoverInput& hovers, const std::vector<SongEntry>& songs) {
     static constexpr Clay_ElementDeclaration songEntryBase{
         .layout = {
             .sizing = { .width = CLAY_SIZING_GROW(0),
@@ -139,18 +157,18 @@ Clay_RenderCommandArray MakeLayout(PlaybackState& state, HoverInput& hovers, std
                                        .y = CLAY_ALIGN_Y_CENTER } }
     };
 
-    static auto MakeSongEntry = [&hovers](Song& song, int songIndex) {
+    static auto MakeSongEntry = [&hovers](const SongEntry& song, int songIndex) {
         Clay_ElementDeclaration config = songEntryBase;
         config.id = CLAY_IDI("Song", songIndex);
-        config.userData = &song;
         CLAY(config) {
             CLAY_TEXT(ToClayString(song.name), &bodyText);
             if (Clay_Hovered())
-                hovers.song = &song;
+                hovers.songId = song.id;
         }
     };
 
-    hovers.song = nullptr;
+    // hovers.song = nullptr;
+    hovers.songId = -1;
     Clay_BeginLayout();
     // TODO: eventually I will want a small gap between the two panels
     CLAY(rootLayout) {
@@ -163,17 +181,15 @@ Clay_RenderCommandArray MakeLayout(PlaybackState& state, HoverInput& hovers, std
                 TimeFormat(state.currTime, playbackTime);
                 CLAY_TEXT(ToClayString(playbackTime), &bodyText);
             }
-            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(0.65f), .height = CLAY_SIZING_GROW(0) },
-                               .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } } }) {
-                CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(0.95f), .height = CLAY_SIZING_FIXED(25) } },
-                       .backgroundColor = { 0, 0, 0, 255 }, }) {
-                    float playbackTimePercent = state.currTime / state.currSong->length;
-                    CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(playbackTimePercent), .height = CLAY_SIZING_GROW(0) } },
-                           .backgroundColor = { 255, 255, 255 ,255 } }) {}
+            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(0.65f), .height = CLAY_SIZING_GROW(0) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } } }) {
+                CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(0.95f), .height = CLAY_SIZING_FIXED(25) } }, .backgroundColor = { 0, 0, 0, 255 }, }) {
+                    const float currTime = state.currTime > state.duration ? state.duration : state.currTime;
+                    const float progress = state.duration > 0.0f ? currTime / state.duration : 0.0f;
+                    CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(progress), .height = CLAY_SIZING_GROW(0) } }, .backgroundColor = { 255, 255, 255 ,255 } }) {}
                 }
             }
             CLAY(timeLayout) {
-                TimeFormat(state.currSong->length, trackLength);
+                TimeFormat(state.duration, trackLength);
                 CLAY_TEXT(ToClayString(trackLength), &bodyText);
             }
         }
@@ -185,12 +201,18 @@ void ClayError(Clay_ErrorData errorData) {
     printf("%s\n", errorData.errorText.chars);
 }
 
-void ChangeSong(PlaybackState& state, Song& song) {
-    if (state.currSong)
-        StopMusicStream(state.currSong->buffer);
-    state.currSong = &song;
+void LoadSong(PlaybackState& state, const SongEntry& song) {
+    if (IsMusicValid(state.audioBuffer)) {
+        StopMusicStream(state.audioBuffer);
+        UnloadMusicStream(state.audioBuffer);
+    }
+
+    state.audioBuffer = LoadMusicStream(song.filename.c_str());
+    state.metadata = &song;
+    state.duration = GetMusicTimeLength(state.audioBuffer);
     state.currTime = 0.0f;
-    PlayMusicStream(state.currSong->buffer);
+
+    PlayMusicStream(state.audioBuffer);
 }
 
 Clay_Dimensions GetScreenDimensions() {
@@ -224,22 +246,32 @@ int main() {
     trackLength.capacity = 10;
     trackLength.size = 0;
 
-    std::vector<Song> songs(3);
-    songs[0].buffer = LoadMusicStream("white-wind.mp3");
-    songs[0].length = GetMusicTimeLength(songs[0].buffer);
-    songs[0].name = "Foreground Eclipse - White Wind";
-    songs[1].buffer = LoadMusicStream("riff-man.mp3");
-    songs[1].length = GetMusicTimeLength(songs[1].buffer);
-    songs[1].name = "Zazen Boys - Riff Man";
-    songs[2].buffer = LoadMusicStream("kali-ma.mp3");
-    songs[2].length = GetMusicTimeLength(songs[2].buffer);
-    songs[2].name = "Cult of Fire - Kali Ma";
+    std::vector<SongEntry> songs(3);
+    songs[0].id = 0;
+    songs[0].filename = "white-wind.mp3";
+    songs[0].fileFormat = AudioFormat::MP3;
+    songs[0].name = "White Wind";
+    songs[0].byArtist = "Foreground Eclipse";
+
+    songs[1].id = 1;
+    songs[1].filename = "riff-man.mp3";
+    songs[1].fileFormat = AudioFormat::MP3;
+    songs[1].name = "Riff Man";
+    songs[1].byArtist = "Zazen Boys";
+
+    songs[2].id = 2;
+    songs[2].filename = "kali-ma.mp3";
+    songs[2].fileFormat = AudioFormat::MP3;
+    songs[2].name = "Kali Ma";
+    songs[2].byArtist = "Cult of Fire";
 
     PlaybackState state;
-    ChangeSong(state, songs[0]);
+    state.metadata = nullptr;
+    state.currTime = 0.0f;
+    state.duration = 0.0f;
 
     HoverInput hovers;
-    hovers.song = nullptr;
+    hovers.songId = -1;
 
     Font fonts[1];
     fonts[0] = LoadFontEx("resources/Roboto-Regular.ttf", 48, 0, 400);
@@ -264,11 +296,13 @@ int main() {
         
         // Phase 2: application state updates
         // TODO: try not to conflate scrolling actions with selection actions
-        if (hovers.song && IsMouseButtonReleased(0))
-            ChangeSong(state, *hovers.song);
+        if (hovers.songId > -1 && IsMouseButtonReleased(0))
+            LoadSong(state, songs[hovers.songId]);
 
-        UpdateMusicStream(state.currSong->buffer);
-        state.currTime = GetMusicTimePlayed(state.currSong->buffer);
+        if (IsMusicValid(state.audioBuffer)) {
+            UpdateMusicStream(state.audioBuffer);
+            state.currTime = GetMusicTimePlayed(state.audioBuffer);
+        }
 
         // Phase 3: layout
         Clay_SetLayoutDimensions(GetScreenDimensions());
@@ -286,9 +320,6 @@ int main() {
     delete[] playbackTime.buffer;
     delete[] trackLength.buffer;
 
-    UnloadMusicStream(songs[0].buffer);
-    UnloadMusicStream(songs[1].buffer);
-    UnloadMusicStream(songs[2].buffer);
     CloseAudioDevice();
     CloseWindow();
     return 0;
