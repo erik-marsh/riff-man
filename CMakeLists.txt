@@ -7,6 +7,7 @@ add_subdirectory(thirdparty/raylib)
 
 add_executable(riff-man
     main.cpp
+    thirdparty/sqlite/sqlite3.c
     Renderer.cpp)
 target_compile_features(riff-man PRIVATE cxx_std_23)
 target_compile_options(riff-man PRIVATE
@@ -19,5 +20,6 @@ target_compile_options(riff-man PRIVATE
 target_include_directories(riff-man PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/raylib/src/
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/clay/
+    ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/sqlite/
 )
 target_link_libraries(riff-man PRIVATE raylib)

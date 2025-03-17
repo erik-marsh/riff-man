@@ -1,6 +1,7 @@
 #include <raylib.h>
 #define CLAY_IMPLEMENTATION
 #include <clay.h>
+#include <sqlite3.h>
 
 #include <array>
 #include <cstdio>
@@ -105,17 +106,12 @@ void TimeFormat(float seconds, StringBuffer& dest) {
     dest.size = res.size;
 }
 
-Clay_RenderCommandArray MakeLayout(PlaybackState& state, HoverInput& hovers, const std::vector<SongEntry>& songs) {
-    static constexpr Clay_ElementDeclaration songEntryBase{
-        .layout = {
-            .sizing = { .width = CLAY_SIZING_GROW(0),
-                        .height = CLAY_SIZING_FIXED(75) },
-            .padding = CLAY_PADDING_ALL(16),
-            .childAlignment = { .x = CLAY_ALIGN_X_CENTER,
-                                .y = CLAY_ALIGN_Y_CENTER } },
-        .backgroundColor = { 100, 100, 100, 255 },
-        .cornerRadius = { 10, 10, 10, 10}
-    };
+Clay_RenderCommandArray MakeLayout(PlaybackState& state,
+                                   HoverInput& hovers,
+                                   const std::vector<SongEntry>& songs) {
+    // TODO: figure out if these need to be static constexpr or not
+    constexpr Clay_ChildAlignment centered{ .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER };
+    constexpr Clay_Sizing growAll{ .width = CLAY_SIZING_GROW(), .height = CLAY_SIZING_GROW() };
 
     // Clay internally caches font configs, so this isn't quite the best approach
     static Clay_TextElementConfig bodyText{
@@ -125,14 +121,12 @@ Clay_RenderCommandArray MakeLayout(PlaybackState& state, HoverInput& hovers, con
 
     static const Clay_ElementDeclaration rootLayout{
         .id = CLAY_ID("RootContainer"),
-        .layout = { .sizing = { .width = CLAY_SIZING_GROW(0),
-                                .height = CLAY_SIZING_GROW(0) },
-                    .layoutDirection = CLAY_TOP_TO_BOTTOM }
+        .layout = { .sizing = growAll, .layoutDirection = CLAY_TOP_TO_BOTTOM }
     };
 
     static const Clay_ElementDeclaration navigationLayout{
         .id = CLAY_ID("NavigationPanel"),
-        .layout = { .sizing = { .width = CLAY_SIZING_GROW(0),
+        .layout = { .sizing = { .width = CLAY_SIZING_GROW(),
                                 .height = CLAY_SIZING_PERCENT(0.85) },
                     .padding = CLAY_PADDING_ALL(16),
                     .childGap = 16,
@@ -143,23 +137,26 @@ Clay_RenderCommandArray MakeLayout(PlaybackState& state, HoverInput& hovers, con
 
     static const Clay_ElementDeclaration controlLayout{
         .id = CLAY_ID("ControlPanel"),
-        .layout = { .sizing = { .width = CLAY_SIZING_GROW(0),
-                                .height = CLAY_SIZING_GROW(0) },
+        .layout = { .sizing = growAll,
                     .padding = CLAY_PADDING_ALL(16),
                     .childGap = 16 },
         .backgroundColor = { 35, 35, 35, 255 }
     };
 
     static constexpr Clay_ElementDeclaration timeLayout{
-       .layout = { .sizing = { .width = CLAY_SIZING_GROW(0),
-                               .height = CLAY_SIZING_GROW(0) },
-                   .childAlignment = { .x = CLAY_ALIGN_X_CENTER,
-                                       .y = CLAY_ALIGN_Y_CENTER } }
+       .layout = { .sizing = growAll, .childAlignment = centered }
     };
 
-    static auto MakeSongEntry = [&hovers](const SongEntry& song, int songIndex) {
-        Clay_ElementDeclaration config = songEntryBase;
-        config.id = CLAY_IDI("Song", songIndex);
+    static auto MakeSongEntry = [&hovers](int songIndex, const SongEntry& song) {
+        const Clay_ElementDeclaration config{
+            .id = CLAY_IDI("Song", songIndex),
+            .layout = {
+                .sizing = { .width = CLAY_SIZING_GROW(), .height = CLAY_SIZING_FIT() },
+                .padding = CLAY_PADDING_ALL(16),
+                .childAlignment = centered },
+            .backgroundColor = { 100, 100, 100, 255 },
+            .cornerRadius = { 10, 10, 10, 10 }
+        };
         CLAY(config) {
             CLAY_TEXT(ToClayString(song.name), &bodyText);
             if (Clay_Hovered())
@@ -167,26 +164,40 @@ Clay_RenderCommandArray MakeLayout(PlaybackState& state, HoverInput& hovers, con
         }
     };
 
-    // hovers.song = nullptr;
+    static constexpr auto MakeProgressBar = [](float currTime, float duration) {
+        currTime = currTime > duration ? duration : currTime;
+        const float progress = duration > 0.0f ? currTime / duration : 0.0f;
+
+        CLAY({ .layout = { .sizing = {
+                               .width = CLAY_SIZING_PERCENT(0.95f),
+                               .height = CLAY_SIZING_FIXED(25) } },
+                           .backgroundColor = { 0, 0, 0, 255 } }) {
+            CLAY({ .layout = { .sizing = {
+                                   .width = CLAY_SIZING_PERCENT(progress),
+                                   .height = CLAY_SIZING_GROW() } },
+                   .backgroundColor = { 255, 255, 255 ,255 } }) {}
+        }
+    };
+
     hovers.songId = -1;
     Clay_BeginLayout();
+
     // TODO: eventually I will want a small gap between the two panels
     CLAY(rootLayout) {
         CLAY(navigationLayout) {
             for (auto [i, song] : std::views::enumerate(songs))
-                MakeSongEntry(song, i);
+              MakeSongEntry(i, song);
         }
         CLAY(controlLayout) {
             CLAY(timeLayout) {
                 TimeFormat(state.currTime, playbackTime);
                 CLAY_TEXT(ToClayString(playbackTime), &bodyText);
             }
-            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(0.65f), .height = CLAY_SIZING_GROW(0) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } } }) {
-                CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(0.95f), .height = CLAY_SIZING_FIXED(25) } }, .backgroundColor = { 0, 0, 0, 255 }, }) {
-                    const float currTime = state.currTime > state.duration ? state.duration : state.currTime;
-                    const float progress = state.duration > 0.0f ? currTime / state.duration : 0.0f;
-                    CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_PERCENT(progress), .height = CLAY_SIZING_GROW(0) } }, .backgroundColor = { 255, 255, 255 ,255 } }) {}
-                }
+            CLAY({ .layout = { .sizing = {
+                                   .width = CLAY_SIZING_PERCENT(0.65f),
+                                   .height = CLAY_SIZING_GROW() },
+                                .childAlignment = centered } }) {
+                MakeProgressBar(state.currTime, state.duration);
             }
             CLAY(timeLayout) {
                 TimeFormat(state.duration, trackLength);
@@ -222,6 +233,11 @@ Clay_Dimensions GetScreenDimensions() {
     };
 }
 
+void LogSQLiteCallback(void*, int errCode, const char* msg) {
+    std::string log = std::format("{}: {}\n", sqlite3_errstr(errCode), msg);
+    printf(log.c_str());
+}
+
 int main() {
     // SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
     InitWindow(960, 540, "[Riff Man]");
@@ -236,6 +252,21 @@ int main() {
     };
     Clay_Initialize(clayArena, GetScreenDimensions(), clayErr);
 
+    sqlite3_config(SQLITE_CONFIG_LOG, LogSQLiteCallback, nullptr);
+ 
+    constexpr int dbFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2("riff-man.db", &db, dbFlags, nullptr)) {
+        sqlite3_close(db);
+        return 1;
+    }
+
+    int err = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS songs(filename TEXT, fileFormat TEXT, name TEXT, byArtist TEXT);", nullptr, nullptr, nullptr);
+    if (err != SQLITE_OK) {
+        sqlite3_close(db);
+        return 1;
+    }
+
     bool debugEnabled = false;
 
     playbackTime.buffer = new char[10];
@@ -246,24 +277,47 @@ int main() {
     trackLength.capacity = 10;
     trackLength.size = 0;
 
-    std::vector<SongEntry> songs(3);
-    songs[0].id = 0;
-    songs[0].filename = "white-wind.mp3";
-    songs[0].fileFormat = AudioFormat::MP3;
-    songs[0].name = "White Wind";
-    songs[0].byArtist = "Foreground Eclipse";
+    sqlite3_stmt* stmt;
+    static constexpr std::string_view sqlCount = "SELECT count(*) FROM songs;";
+    err = sqlite3_prepare_v2(db, sqlCount.data(), sqlCount.size() + 1, &stmt, nullptr);
+    if (err != SQLITE_OK)
+        return 1;
 
-    songs[1].id = 1;
-    songs[1].filename = "riff-man.mp3";
-    songs[1].fileFormat = AudioFormat::MP3;
-    songs[1].name = "Riff Man";
-    songs[1].byArtist = "Zazen Boys";
+    err = sqlite3_step(stmt);
+    if (err != SQLITE_ROW)
+        return 1;
 
-    songs[2].id = 2;
-    songs[2].filename = "kali-ma.mp3";
-    songs[2].fileFormat = AudioFormat::MP3;
-    songs[2].name = "Kali Ma";
-    songs[2].byArtist = "Cult of Fire";
+    const long count = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+
+    static constexpr std::string_view sqlGet = "SELECT rowid, * FROM songs;";
+    err = sqlite3_prepare_v2(db, sqlGet.data(), sqlGet.size() + 1, &stmt, nullptr);
+    if (err != SQLITE_OK)
+        return 1;
+
+    static constexpr auto ToString = [](const unsigned char* str) {
+        return std::string(reinterpret_cast<const char*>(str));
+    };
+
+    std::vector<SongEntry> songs(count);
+    for (int i = 0; i < count; i++) {
+        err = sqlite3_step(stmt);
+        if (err != SQLITE_ROW)
+            return 1;
+
+        // SQLite tables are 1-indexed (god why...)
+        // songs[i].id = sqlite3_column_int64(stmt, 0) - 1;
+        // This is not the database id, it's just for reverse lookup into the vector (for now...)
+        songs[i].id = i;
+        songs[i].filename = ToString(sqlite3_column_text(stmt, 1));
+        songs[i].fileFormat = AudioFormat::MP3;
+        songs[i].name = ToString(sqlite3_column_text(stmt, 3));
+        songs[i].byArtist = ToString(sqlite3_column_text(stmt, 4));
+    }
+    sqlite3_finalize(stmt);
+
+    // for (const auto& song : songs)
+    //     printf("%ld => %s - %s [%s]\n", song.id, song.name.c_str(), song.byArtist.c_str(), song.filename.c_str());
 
     PlaybackState state;
     state.metadata = nullptr;
