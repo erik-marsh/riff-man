@@ -4,3 +4,6 @@
 [submodule "thirdparty/raylib"]
 	path = thirdparty/raylib
 	url = https://github.com/raysan5/raylib.git
+[submodule "thirdparty/raqm"]
+	path = thirdparty/raqm
+	url = https://github.com/HOST-Oman/libraqm.git
