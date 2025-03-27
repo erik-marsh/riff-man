@@ -2,6 +2,8 @@
 #define CLAY_IMPLEMENTATION
 #include <clay.h>
 #include <sqlite3.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H
 
 #include <array>
 #include <cstdio>
@@ -267,6 +269,27 @@ int main() {
         return 1;
     }
 
+    FT_Library ft;
+    err = FT_Init_FreeType(&ft);
+    if (err) {
+        FTPrintError(err);
+        return 1;
+    }
+
+    FT_Face face;
+    err = FT_New_Face(ft, "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0, &face);
+    if (err) {
+        FTPrintError(err);
+        return 1;
+    }
+
+    // TODO: this should not be hardcoded
+    err = FT_Set_Pixel_Sizes(face, 20, 20);
+    if (err) {
+        FTPrintError(err);
+        return 1;
+    }
+
     bool debugEnabled = false;
 
     playbackTime.buffer = new char[10];
@@ -331,7 +354,7 @@ int main() {
     fonts[0] = LoadFontEx("resources/Roboto-Regular.ttf", 48, 0, 400);
     SetTextureFilter(fonts[0].texture, TEXTURE_FILTER_BILINEAR);
 
-    Clay_SetMeasureTextFunction(MeasureText, fonts);
+    Clay_SetMeasureTextFunction(FTMeasureText, reinterpret_cast<FT_Face>(face));
 
     while (!WindowShouldClose()) {
         // Phase 1: input state updates
@@ -367,12 +390,15 @@ int main() {
         // Phase 4: render
         BeginDrawing();
         ClearBackground(BLACK);
-        RenderFrame(renderCommands, fonts);
+        RenderFrame(renderCommands, face);
         EndDrawing();
     }
 
     delete[] playbackTime.buffer;
     delete[] trackLength.buffer;
+
+    FT_Done_Face(face);
+    FT_Done_FreeType(ft);
 
     CloseAudioDevice();
     CloseWindow();

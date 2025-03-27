@@ -8,6 +8,10 @@
 
 #include <raylib.h>
 
-Clay_Dimensions MeasureText(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
-void RenderFrame(Clay_RenderCommandArray cmds, Font* fonts);
+#include <ft2build.h>
+#include FT_FREETYPE_H
 
+// userData should be FT_Face (which is a pointer type)
+void RenderFrame(Clay_RenderCommandArray cmds, FT_Face face);
+Clay_Dimensions FTMeasureText(Clay_StringSlice text, Clay_TextElementConfig* config, void* userData);
+void FTPrintError(int error);

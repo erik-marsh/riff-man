@@ -1,7 +1,284 @@
+// Some notes from the FreeType "Glyph Conventions" article:
+// 
+// "points" are a physical unit, not a logical one
+// one point = 1/72 inches
+// pixel size = point size * dpi / 72
+//     these may be different for the x and y axis, too
+// so, right of the bat, measuring text is not an easy task necessarily
+// 
+// outline => the scalable version of a glyph
+//            outlines are defined as points on a discrete grid
+//            this grid is large enough that you can assume it is continuous
+//
+// glyphs have their own coordinate system:
+//   x axis: L to R
+//   y axis: bottom to top
+// the "em square" is a virtual canvas on which a glyph is drawn
+// it is useful for scaling text
+// fonts can indeed draw glyph segments outside of the em square 
+//
+// grid fitting is a thing
+// basically: there's a lot of transformations between coord systems going on
+// this causes issues, because screens are discrete pixel grids,
+// while fonts are typically curves on a continuous coordinate system
+//
+// BASICS OF LAYOUT
+// i will only be considering horizontal layouts here.
+//     I have never seen a UI in a vertical layout. sorry mongolia
+// baseline => a guide for glyph placement
+//             in horizontal layouts, glyphs sit on the baseline
+// pen position/origin => a virtual point on the baseline used to render a glyph
+// advance width => distance between two successive pen positions
+//                  ALWAYS POSITIVE, even in R->L scripts
+//                  there is such a thing as advance height, but that is only for vertical scripts
+// ascent => distance between baseline and highest outline point of a glyph
+//           always positive (Y IS UP)
+// descent => distance between baseline and lowest outline point of a glyph
+//           always negative (Y IS UP)
+// linegap => distance between two lines of text
+//            the proper baseline-to-baseline distance is (ascent - descent + linegap)
+// bounding box => of a glyph. self-explanatory
+// internal leading => space taken by stuff outside the em square (ascent - descent - em size)
+// external leading => linegap
+//
+// bearings =>
+//   left side => distance from pen pos to glyph's left bbox edge
+//   top side => distance from pen pos to glyph's top bbox edge
+//   right side => distance from right bbox edge to the advance width
+// glyph width => self-explanatory. can be derived from bbox values
+// glyph height => self-explanatory. can be derived from bbox values
+//
+// 26.6 refers to a fixed point encoding used by FreeType
+//     26 bit integer part, 6 bit fractional part
+//     hence the value of smallest magnitude is 1/(2^6) = 1/64
+//     therefore, any 26.6 value is interpreted as n/64ths of some unit
+//     this unit is not necessarily pixels... be vigilant
+
 #include "Renderer.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <limits>
+#include <vector>
+
+#include <raqm.h>
+
+void FTPrintError(FT_Error error) {
+#undef FTERRORS_H_
+#define FT_ERRORDEF(err, errInt, str) case err: printf("FreeType: %s\n", str); break;
+#define FT_ERROR_START_LIST switch(error) {
+#define FT_ERROR_END_LIST default: printf("FreeType: Unknown error.\n"); break; }
+#include FT_ERRORS_H
+}
+
+// NOTE: Interestingly, Clay determines wrapping, not us.
+//       Thus the burden falls on us to know when Clay will wrap
+//       and we must adjust our measure accordingly.
+Clay_Dimensions FTMeasureText(Clay_StringSlice text, Clay_TextElementConfig* config, void* userData) {
+    const char* lang = "jp";
+    Clay_Dimensions ret{ .width = 0.0f, .height = 0.0f };
+
+    FT_Face face = reinterpret_cast<FT_Face>(userData);
+
+    raqm_t* rq = raqm_create();
+    raqm_set_text_utf8(rq, text.chars, text.length);  // hides a call to realloc 
+    raqm_set_freetype_face(rq, face);
+    raqm_set_par_direction(rq, RAQM_DIRECTION_LTR);
+    raqm_set_language(rq, lang, 0, text.length);
+    raqm_layout(rq);
+
+    size_t count;
+    raqm_glyph_t* glyphs = raqm_get_glyphs(rq, &count);
+
+    // TODO: I'm not sure if we need to know the pen's initial position when
+    //       measuring text, or if wa just need to consider only the texture's
+    //       width and height.
+    // TODO: we might be able to get away with setting the text height to the font size in pixels
+    unsigned int width = 0;
+    FT_Pos yLo = std::numeric_limits<FT_Pos>::max(); // TODO: see font descent maybe?
+    FT_Pos yHi = std::numeric_limits<FT_Pos>::min(); // TODO: similarly, ascent?
+    for (size_t i = 0; i < count; i++) {
+        FT_Load_Glyph(face, glyphs[i].index, FT_LOAD_DEFAULT);
+        yHi = std::max(yHi, face->glyph->metrics.horiBearingY);
+        yLo = std::min(yLo, face->glyph->metrics.horiBearingY - face->glyph->metrics.height);
+        
+        // TODO: how should negative left bearings be handled?
+        //       maybe just ignore it until it becomes a problem?
+        // TODO: you could add only the glyph width on the last iteration,
+        //              and that would reduce the size of the texture,
+        //              but for some incomprehensible reason that fucked up the whole loop
+        //              I still have no idea what went wrong.
+        if (i == 0)
+            width += face->glyph->metrics.horiBearingX;
+        width += glyphs[i].x_advance;
+    }
+
+    raqm_destroy(rq);
+
+    // metrics need to be converted from 26.6 format
+    ret.width = static_cast<float>(width / 64);
+    ret.height = static_cast<float>((yHi - yLo) / 64);
+    return ret;
+}
+
+void DrawGlyph(std::vector<uint8_t>& image, int imageWidth, int imageHeight,
+               FT_GlyphSlot glyph, int penX, int penY, bool debug) {
+    const int xOrigin = penX + glyph->bitmap_left;
+    const int yOrigin = penY + glyph->bitmap_top - glyph->bitmap.rows;
+    const FT_Bitmap& bmp = glyph->bitmap;
+
+    for (unsigned int bx = 0; bx < bmp.width; bx++) {
+         for (unsigned int by = 0; by < bmp.rows; by++) {
+            const int x = xOrigin + bx;
+            if (x >= imageWidth || x < 0) continue;
+
+            // the TGA image is a "y-down" system
+            // whereas the FreeType bitmat is a "y-up" system
+            const int y = yOrigin + (bmp.rows - by - 1);
+            if (y >= imageHeight || y < 0) continue;
+
+            const int outOffset = (4 * y * imageWidth) + (4 * x) + 18;
+            const int bitmapOffset = bmp.width * by + bx;
+            // a 32-bit depth TGA's colors are BGRA
+            image[outOffset + 0] |= bmp.buffer[bitmapOffset];
+            image[outOffset + 1] |= bmp.buffer[bitmapOffset];
+            image[outOffset + 2] |= bmp.buffer[bitmapOffset];
+            image[outOffset + 3] |= bmp.buffer[bitmapOffset];
+
+            // show's character's bounding box in blue
+            if (debug && (bx == 0 || by == 0 || bx == bmp.width - 1 || by == bmp.rows - 1)) {
+                image[outOffset + 0] = 0xFF;
+                image[outOffset + 3] = 0xFF;
+            }
+        }
+    }
+}
+
+void FTDrawText(FT_Face face, const char* text, int textLen, const char* lang, int xPos, int yPos) {
+    const auto sizes = FTMeasureText(Clay_StringSlice{.length = textLen, .chars = text}, nullptr, face);
+    const int width = static_cast<int>(sizes.width);
+    const int height = static_cast<int>(sizes.height);
+
+    std::vector<uint8_t> image(4 * width * height + 18, 0);
+    const auto OffsetOf = [&width](int x, int y) {
+        return (4 * y * width) + (4 * x) + 18;
+    };
+
+    image[2] = 2;
+    image[12] = width & 0x00FF;
+    image[13] = (width & 0xFF00) >> 8;
+    image[14] = height & 0x00FF;
+    image[15] = (height & 0xFF00) >> 8;
+    image[16] = 32;
+
+    raqm_t* rq = raqm_create();
+    raqm_set_text_utf8(rq, text, textLen);  // hides a call to realloc 
+    raqm_set_freetype_face(rq, face);
+    raqm_set_par_direction(rq, RAQM_DIRECTION_LTR);
+    raqm_set_language(rq, lang, 0, textLen);
+    raqm_layout(rq);
+
+    constexpr bool debug = false;
+    int yLo = std::numeric_limits<int>::max(); 
+    int yHi = std::numeric_limits<int>::min(); 
+
+    FT_Error error;
+    size_t count;
+    raqm_glyph_t *glyphs = raqm_get_glyphs(rq, &count);
+    // printf("glyph count: %zu\n", count);
+    // for proper placement on the texture we need to iterate over the glyphs 
+    // and determine how low below the baseline we need to render
+    // TODO: merge this step and the texture size calculation
+    // TODO: we need to do something similar for negative left bearings of first chars too
+    FT_Pos pxBelowBaseline = std::numeric_limits<int>::max();
+    for (size_t i = 0; i < count; i++) {
+        error = FT_Load_Glyph(face, glyphs[i].index, FT_LOAD_DEFAULT);
+        if (error) FTPrintError(error);
+        pxBelowBaseline = std::min(pxBelowBaseline, face->glyph->metrics.horiBearingY - face->glyph->metrics.height);
+    }
+
+    pxBelowBaseline /= 64;
+
+    int penX = 0;
+    int penY = pxBelowBaseline < 0 ? 0 - pxBelowBaseline : 0;
+
+    for (size_t i = 0; i < count; i++)
+    {
+        // printf ("gid#%d\toff: (%d, %d) adv: (%d, %d) idx: %d\n",
+        //         glyphs[i].index,
+        //         glyphs[i].x_offset,
+        //         glyphs[i].y_offset,
+        //         glyphs[i].x_advance,
+        //         glyphs[i].y_advance,
+        //         glyphs[i].cluster);
+
+        error = FT_Load_Glyph(face, glyphs[i].index, FT_LOAD_DEFAULT);
+        if (error)
+            FTPrintError(error);
+
+        error = FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
+        if (error)
+            FTPrintError(error);
+
+        DrawGlyph(image, width, height, face->glyph, penX, penY, debug);
+
+        if (debug) {
+            // draw baseline in green
+            const int offset = OffsetOf(penX, penY);
+            int nPixels = glyphs[i].x_advance / 64;
+            if (penX + nPixels > width)
+                nPixels = width - penX;
+
+            for (int i = 0; i < nPixels; i++) {
+                image[offset + (4 * i) + 1] = 0xFF;
+                image[offset + (4 * i) + 3] = 0xFF;
+            }
+
+            const int iTop = static_cast<int>(face->glyph->bitmap_top);
+            const int iRows = static_cast<int>(face->glyph->bitmap.rows);
+            yHi = std::max(yHi, iTop);
+            yLo = std::min(yLo, iTop - iRows);  
+        }
+            
+        // I'm pretty sure this is using the same 26.6 format that FreeType uses
+        penX += (glyphs[i].x_advance / 64);
+    }
+
+    if (debug) {
+        // draw whole text bbox in red
+        for (int i = 0; i < width; i++) {
+            const int offsetLower = OffsetOf(i, 0);
+            const int offsetUpper = OffsetOf(i, height - 1);
+            image[offsetLower + 2] = 0xFF;
+            image[offsetLower + 3] = 0xFF;
+            image[offsetUpper + 2] = 0xFF;
+            image[offsetUpper + 3] = 0xFF;
+        }
+
+        for (int i = 1; i < height - 1; i++) {
+            const int offsetLeft = OffsetOf(0, i);
+            const int offsetRight = OffsetOf(width - 1, i);
+            image[offsetLeft + 2] = 0xFF;
+            image[offsetLeft + 3] = 0xFF;
+            image[offsetRight + 2] = 0xFF;
+            image[offsetRight + 3] = 0xFF;
+        }
+    }
+
+    // FILE* file = std::fopen("out.tga", "w");
+    // for (uint8_t i : image)
+    //     std::putc(i, file);
+    // std::fclose(file);
+
+    raqm_destroy(rq);
+
+    Image rlImage = LoadImageFromMemory(".tga", image.data(), image.size());
+    Texture rlTexture = LoadTextureFromImage(rlImage);
+
+    DrawTexture(rlTexture, xPos, yPos, Color{255,255,255,255});
+}
 
 // Custom raylib functions for string view text buffers 
 // Raysan has explicitly stated he will not be supporting these.
@@ -115,7 +392,7 @@ constexpr Color ClayToRaylibColor(const Clay_Color& color) {
 
 // I really don't foresee the bounds-checked get being necessary here.
 // (If I become a Rust dev in the next 5 years I'll eat my Suisei plushie)
-void RenderFrame(Clay_RenderCommandArray cmds, Font* fonts) {
+void RenderFrame(Clay_RenderCommandArray cmds, FT_Face face) {
     for (int i = 0; i < cmds.length; i++) { 
         const Clay_RenderCommand& cmd = *(Clay_RenderCommandArray_Get(&cmds, i));
         const Clay_BoundingBox& bb = cmd.boundingBox;
@@ -123,13 +400,19 @@ void RenderFrame(Clay_RenderCommandArray cmds, Font* fonts) {
         switch (cmd.commandType) {
             case CLAY_RENDER_COMMAND_TYPE_TEXT: {
                 const Clay_TextRenderData& text = cmd.renderData.text;
-                DrawTextExN(fonts[text.fontId],
-                            text.stringContents.chars,
-                            text.stringContents.length,
-                            Vector2{bb.x, bb.y},
-                            static_cast<float>(text.fontSize),
-                            static_cast<float>(text.letterSpacing),
-                            ClayToRaylibColor(text.textColor));
+                // DrawTextExN(fonts[text.fontId],
+                //             text.stringContents.chars,
+                //             text.stringContents.length,
+                //             Vector2{bb.x, bb.y},
+                //             static_cast<float>(text.fontSize),
+                //             static_cast<float>(text.letterSpacing),
+                //             ClayToRaylibColor(text.textColor));
+                FTDrawText(face,
+                           text.stringContents.chars,
+                           text.stringContents.length,
+                           "jp",  // TODO: yeah this can't just be like that lol
+                           bb.x,
+                           bb.y);
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_IMAGE: {
