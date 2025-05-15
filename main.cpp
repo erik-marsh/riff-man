@@ -51,10 +51,6 @@ struct PlaybackState {
     float currTime;
 };
 
-struct HoverInput {
-    long songId;
-};
-
 struct StringBuffer {
     char* buffer;
     size_t capacity;
@@ -66,33 +62,28 @@ struct StringBuffer {
 StringBuffer playbackTime;
 StringBuffer trackLength;
 
-namespace colors {
-    // fun color pallete i generated from coolers.co
-    // i mostly like the black, white, and the blue as a highlight color
-    // the red and green i can really give or take
-    constexpr Clay_Color black    { 0x0D, 0x1B, 0x1E, 0xFF };
-    constexpr Clay_Color gray     { 0x45, 0x55, 0x55, 0xFF };
-    constexpr Clay_Color lightgray{ 0x80, 0x80, 0x80, 0xFF };
-    constexpr Clay_Color blue     { 0x05, 0x8E, 0xD9, 0xFF };
-    constexpr Clay_Color white    { 0xCD, 0xDD, 0xDD, 0xFF };
-    // constexpr Color red  { 0xF2, 0x54, 0x2D, 0xFF };
-    // constexpr Color green{ 0x58, 0x81, 0x57, 0xFF };
-};
+namespace casts::clay {
+    constexpr Clay_Vector2 Vector2(Vector2 v) {
+        return { .x = v.x, .y = v.y };
+    }
 
-constexpr Clay_Vector2 RaylibToClayVector2(Vector2 vector) {
-    return Clay_Vector2{ .x = vector.x, .y = vector.y };
-}
-
-constexpr Clay_String ToClayString(const std::string& str) {
-    return { .length = static_cast<int32_t>(str.size()), .chars = str.data() };
-}
-
-constexpr Clay_String ToClayString(std::string_view str) {
-    return { .length = static_cast<int32_t>(str.size()), .chars = str.data() };
-}
-
-constexpr Clay_String ToClayString(const StringBuffer& str) {
-    return { .length = static_cast<int32_t>(str.size), .chars = str.buffer };
+    constexpr Clay_String String(const std::string& str) {
+        return {
+            .length = static_cast<int32_t>(str.size()),
+            .chars = str.data() };
+    }
+    
+    constexpr Clay_String String(std::string_view str) {
+        return {
+            .length = static_cast<int32_t>(str.size()),
+            .chars = str.data() };
+    }
+    
+    constexpr Clay_String String(const StringBuffer& str) {
+        return {
+            .length = static_cast<int32_t>(str.size),
+            .chars = str.buffer };
+    }
 }
 
 // If we declare our layout in a function,
@@ -105,91 +96,111 @@ void TimeFormat(float seconds, StringBuffer& dest) {
     const int hh = mm / 60;
 
     std::format_to_n_result<char*> res;
-    if (hh == 0) [[likely]]
+    if (hh == 0)
         res = std::format_to_n(dest.buffer, dest.capacity - 1, "{}:{:02}", mm, ss);
-    else [[unlikely]]
+    else
         res = std::format_to_n(dest.buffer, dest.capacity - 1, "{}:{}:{:02}", hh, mm, ss);
     *res.out = '\0';
     dest.size = res.size;
 }
 
-Clay_RenderCommandArray MakeLayout(PlaybackState& state,
-                                   HoverInput& hovers,
-                                   std::vector<SongEntry>& songs) {
-    // TODO: figure out if these need to be static constexpr or not
+struct LayoutInfo {
+    Clay_RenderCommandArray renderCommands;
+    long hoveredSongId;
+};
+
+LayoutInfo MakeLayout(const PlaybackState& state, std::vector<SongEntry>& songs) {
+    // Clay internally caches font configs, so this isn't quite the best approach
+    // static Clay_TextElementConfig bodyText{ .textColor = white, .fontSize = 24 };
+    // TODO: check if things need to be static constexpr
+    constexpr Clay_Color white     { 255, 255, 255, 255 };
+    constexpr Clay_Color black     { 0, 0, 0, 255 };
+    constexpr Clay_Color lightgray { 100, 100, 100, 255 };
+    constexpr Clay_Color darkgray  { 50, 50, 50, 255 };
+    constexpr Clay_Color darkergray{ 35, 35, 35, 255 };
+
     constexpr Clay_ChildAlignment centered{ .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER };
+    constexpr Clay_CornerRadius rounding{ 10, 10, 10, 10 };
     constexpr Clay_Sizing growAll{ .width = CLAY_SIZING_GROW(), .height = CLAY_SIZING_GROW() };
 
-    // Clay internally caches font configs, so this isn't quite the best approach
-    static Clay_TextElementConfig bodyText{
-        .textColor = { 255, 255, 255, 255 },
-        .fontSize = 24
+    constexpr Clay_ElementDeclaration rootLayout{
+        .layout = {
+            .sizing = growAll,
+            .layoutDirection = CLAY_TOP_TO_BOTTOM }
     };
-
-    static const Clay_ElementDeclaration rootLayout{
-        .id = CLAY_ID("RootContainer"),
-        .layout = { .sizing = growAll, .layoutDirection = CLAY_TOP_TO_BOTTOM }
-    };
-
-    static const Clay_ElementDeclaration navigationLayout{
-        .id = CLAY_ID("NavigationPanel"),
-        .layout = { .sizing = { .width = CLAY_SIZING_GROW(),
-                                .height = CLAY_SIZING_PERCENT(0.85) },
-                    .padding = CLAY_PADDING_ALL(16),
-                    .childGap = 16,
-                    .layoutDirection = CLAY_TOP_TO_BOTTOM },
-        .backgroundColor = { 50, 50, 50, 255 },
+    constexpr Clay_ElementDeclaration navigationLayout{
+        .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(), .height = CLAY_SIZING_PERCENT(0.85) },
+            .padding = CLAY_PADDING_ALL(16),
+            .childGap = 16,
+            .layoutDirection = CLAY_TOP_TO_BOTTOM },
+        .backgroundColor = darkgray,
         .scroll = { .vertical = true }
     };
-
-    static const Clay_ElementDeclaration controlLayout{
-        .id = CLAY_ID("ControlPanel"),
-        .layout = { .sizing = growAll,
-                    .padding = CLAY_PADDING_ALL(16),
-                    .childGap = 16 },
-        .backgroundColor = { 35, 35, 35, 255 }
+    constexpr Clay_ElementDeclaration controlLayout{
+        .layout = {
+            .sizing = growAll,
+            .padding = CLAY_PADDING_ALL(16),
+            .childGap = 16 },
+        .backgroundColor = darkergray
+    };
+    constexpr Clay_ElementDeclaration timeLayout{
+        .layout = {
+            .sizing = growAll,
+            .childAlignment = centered }
+    };
+    constexpr Clay_ElementDeclaration progressLayout{
+        .layout = {
+            .sizing = { .width = CLAY_SIZING_PERCENT(0.65f), .height = CLAY_SIZING_GROW() } }
     };
 
-    static constexpr Clay_ElementDeclaration timeLayout{
-       .layout = { .sizing = growAll, .childAlignment = centered }
-    };
+    LayoutInfo ret;
 
-    static auto MakeSongEntry = [&hovers](int songIndex, SongEntry& song) {
+    static auto MakeSongEntry = [&ret](int songIndex, SongEntry& song) {
+        const auto dim = song.text.ClayDimensions();
         const Clay_ElementDeclaration config{
             .id = CLAY_IDI("Song", songIndex),
             .layout = {
                 .sizing = { .width = CLAY_SIZING_GROW(), .height = CLAY_SIZING_FIT() },
                 .padding = CLAY_PADDING_ALL(16),
                 .childAlignment = centered },
-            .backgroundColor = { 100, 100, 100, 255 },
-            .cornerRadius = { 10, 10, 10, 10 }
+            .backgroundColor = lightgray,
+            .cornerRadius = rounding
+        };
+        const Clay_ElementDeclaration imageConfig{
+            .layout = {
+                .sizing = { .width = CLAY_SIZING_FIXED(dim.width),
+                            .height = CLAY_SIZING_FIXED(dim.height) } },
+            .image = {
+                .imageData = &song.text.RaylibTexture(),
+                .sourceDimensions = dim }
         };
         CLAY(config) {
-            //CLAY_TEXT(ToClayString(song.name), &bodyText);
-            const auto dim = song.text.ClayDimensions();
-            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_FIXED(dim.width), .height = CLAY_SIZING_FIXED(dim.height) } },
-                   .image = { .imageData = &song.text.RaylibTexture(), .sourceDimensions = song.text.ClayDimensions() } }) { }
+            CLAY(imageConfig) {}
+
             if (Clay_Hovered())
-                hovers.songId = song.id;
+                ret.hoveredSongId = song.id;
         }
     };
 
     static constexpr auto MakeProgressBar = [](float currTime, float duration) {
+        constexpr Clay_Sizing fullBar{
+            .width = CLAY_SIZING_PERCENT(0.95f),
+            .height = CLAY_SIZING_FIXED(25)
+        };
+
         currTime = currTime > duration ? duration : currTime;
         const float progress = duration > 0.0f ? currTime / duration : 0.0f;
+        const Clay_Sizing partialBar{
+            .width = CLAY_SIZING_PERCENT(progress),
+            .height = CLAY_SIZING_GROW()
+        };
 
-        CLAY({ .layout = { .sizing = {
-                               .width = CLAY_SIZING_PERCENT(0.95f),
-                               .height = CLAY_SIZING_FIXED(25) } },
-                           .backgroundColor = { 0, 0, 0, 255 } }) {
-            CLAY({ .layout = { .sizing = {
-                                   .width = CLAY_SIZING_PERCENT(progress),
-                                   .height = CLAY_SIZING_GROW() } },
-                   .backgroundColor = { 255, 255, 255 ,255 } }) {}
+        CLAY({ .layout = { .sizing = fullBar }, .backgroundColor = black }) {
+            CLAY({ .layout = { .sizing = partialBar }, .backgroundColor = white }) {}
         }
     };
 
-    hovers.songId = -1;
     Clay_BeginLayout();
 
     // TODO: eventually I will want a small gap between the two panels
@@ -200,22 +211,21 @@ Clay_RenderCommandArray MakeLayout(PlaybackState& state,
         }
         CLAY(controlLayout) {
             CLAY(timeLayout) {
-                TimeFormat(state.currTime, playbackTime);
-                // CLAY_TEXT(ToClayString(playbackTime), &bodyText);
+                // TimeFormat(state.currTime, playbackTime);
+                // CLAY_TEXT(casts::clay::String(playbackTime), &bodyText);
             }
-            CLAY({ .layout = { .sizing = {
-                                   .width = CLAY_SIZING_PERCENT(0.65f),
-                                   .height = CLAY_SIZING_GROW() },
-                                .childAlignment = centered } }) {
+            CLAY(progressLayout) {
                 MakeProgressBar(state.currTime, state.duration);
             }
             CLAY(timeLayout) {
-                TimeFormat(state.duration, trackLength);
-                // CLAY_TEXT(ToClayString(trackLength), &bodyText);
+                // TimeFormat(state.duration, trackLength);
+                // CLAY_TEXT(casts::clay::String(trackLength), &bodyText);
             }
         }
     }
-    return Clay_EndLayout();
+
+    ret.renderCommands = Clay_EndLayout();
+    return ret;
 }
 
 void ClayError(Clay_ErrorData errorData) {
@@ -350,13 +360,14 @@ int main() {
     }
     sqlite3_finalize(stmt);
 
-    PlaybackState state;
-    state.metadata = nullptr;
-    state.currTime = 0.0f;
-    state.duration = 0.0f;
+    PlaybackState state{
+        .audioBuffer = {},
+        .metadata = nullptr,
+        .duration = 0.0f,
+        .currTime = 0.0f
+    };
 
-    HoverInput hovers;
-    hovers.songId = -1;
+    long hoveredSongId = -1;
 
     Clay_SetMeasureTextFunction(FTMeasureText, reinterpret_cast<FT_Face>(face));
 
@@ -367,18 +378,22 @@ int main() {
             Clay_SetDebugModeEnabled(debugEnabled);
         }
 
-        const Clay_Vector2 mousePosition = RaylibToClayVector2(GetMousePosition());
-        const Clay_Vector2 mouseWheelDelta = RaylibToClayVector2(GetMouseWheelMoveV());
-        // NOTE: the example code is wrong
-        //       this function only cares about the up/down state, not the release/press state
+        const auto mousePosition = casts::clay::Vector2(GetMousePosition());
+        const auto mouseWheelDelta = casts::clay::Vector2(GetMouseWheelMoveV());
+
+        // the example code is wrong
+        // this function only cares about the up/down state,
+        // not the release/press state
         Clay_SetPointerState(mousePosition, IsMouseButtonDown(0));
-        // NOTE: parameter 1: enableDragScrolling
-        Clay_UpdateScrollContainers(true, mouseWheelDelta, GetFrameTime());
+
+        // Parameter 1: enableDragScrolling
+        // When this is enabled, it will probably cause weird issues
+        // where songs are selected by releasing the touch scroll.
+        Clay_UpdateScrollContainers(false, mouseWheelDelta, GetFrameTime());
         
         // Phase 2: application state updates
-        // TODO: try not to conflate scrolling actions with selection actions
-        if (hovers.songId > -1 && IsMouseButtonReleased(0))
-            LoadSong(state, songs[hovers.songId]);
+        if (hoveredSongId > -1 && IsMouseButtonReleased(0))
+            LoadSong(state, songs[hoveredSongId]);
 
         if (IsMusicValid(state.audioBuffer)) {
             UpdateMusicStream(state.audioBuffer);
@@ -386,16 +401,16 @@ int main() {
         }
 
         // Phase 3: layout
+        // MakeLayout will implicitly update input state.
+        // We consider this to be part of next frame's phase 1.
         Clay_SetLayoutDimensions(GetScreenDimensions());
-        // note how the input state update that happens here
-        // is implicitly part of phase 1 of the next loop
-        Clay_RenderCommandArray renderCommands = MakeLayout(state, hovers, songs);
+        auto [renderCommands, hovered] = MakeLayout(state, songs);
+        hoveredSongId = hovered;
 
         // Phase 4: render
         BeginDrawing();
         ClearBackground(BLACK);
         RenderFrame(renderCommands, face);
-        // DrawTexture(rlTexture, 0, 0, RAYWHITE);
         EndDrawing();
     }
 
