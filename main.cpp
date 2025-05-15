@@ -5,17 +5,20 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <format>
+#include <numeric>
 #include <ranges>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "Renderer.hpp"
+#include "TextUtils.hpp"
 
 // parallel to what will be the database entry for a song
 // basing this schema partially off of https://schema.org/MusicRecording
@@ -37,6 +40,8 @@ struct SongEntry {
     std::string byArtist;
     // std::string inAlbum;
     // float duration;  // in seconds
+
+    DynamicText text;
 };
 
 struct PlaybackState {
@@ -110,7 +115,7 @@ void TimeFormat(float seconds, StringBuffer& dest) {
 
 Clay_RenderCommandArray MakeLayout(PlaybackState& state,
                                    HoverInput& hovers,
-                                   const std::vector<SongEntry>& songs) {
+                                   std::vector<SongEntry>& songs) {
     // TODO: figure out if these need to be static constexpr or not
     constexpr Clay_ChildAlignment centered{ .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER };
     constexpr Clay_Sizing growAll{ .width = CLAY_SIZING_GROW(), .height = CLAY_SIZING_GROW() };
@@ -149,7 +154,7 @@ Clay_RenderCommandArray MakeLayout(PlaybackState& state,
        .layout = { .sizing = growAll, .childAlignment = centered }
     };
 
-    static auto MakeSongEntry = [&hovers](int songIndex, const SongEntry& song) {
+    static auto MakeSongEntry = [&hovers](int songIndex, SongEntry& song) {
         const Clay_ElementDeclaration config{
             .id = CLAY_IDI("Song", songIndex),
             .layout = {
@@ -160,7 +165,10 @@ Clay_RenderCommandArray MakeLayout(PlaybackState& state,
             .cornerRadius = { 10, 10, 10, 10 }
         };
         CLAY(config) {
-            CLAY_TEXT(ToClayString(song.name), &bodyText);
+            //CLAY_TEXT(ToClayString(song.name), &bodyText);
+            const auto dim = song.text.ClayDimensions();
+            CLAY({ .layout = { .sizing = { .width = CLAY_SIZING_FIXED(dim.width), .height = CLAY_SIZING_FIXED(dim.height) } },
+                   .image = { .imageData = &song.text.RaylibTexture(), .sourceDimensions = song.text.ClayDimensions() } }) { }
             if (Clay_Hovered())
                 hovers.songId = song.id;
         }
@@ -193,7 +201,7 @@ Clay_RenderCommandArray MakeLayout(PlaybackState& state,
         CLAY(controlLayout) {
             CLAY(timeLayout) {
                 TimeFormat(state.currTime, playbackTime);
-                CLAY_TEXT(ToClayString(playbackTime), &bodyText);
+                // CLAY_TEXT(ToClayString(playbackTime), &bodyText);
             }
             CLAY({ .layout = { .sizing = {
                                    .width = CLAY_SIZING_PERCENT(0.65f),
@@ -203,7 +211,7 @@ Clay_RenderCommandArray MakeLayout(PlaybackState& state,
             }
             CLAY(timeLayout) {
                 TimeFormat(state.duration, trackLength);
-                CLAY_TEXT(ToClayString(trackLength), &bodyText);
+                // CLAY_TEXT(ToClayString(trackLength), &bodyText);
             }
         }
     }
@@ -290,6 +298,8 @@ int main() {
         return 1;
     }
 
+    raqm_t* rq = raqm_create();
+
     bool debugEnabled = false;
 
     playbackTime.buffer = new char[10];
@@ -336,11 +346,9 @@ int main() {
         songs[i].fileFormat = AudioFormat::MP3;
         songs[i].name = ToString(sqlite3_column_text(stmt, 3));
         songs[i].byArtist = ToString(sqlite3_column_text(stmt, 4));
+        songs[i].text.LoadText(songs[i].name, face, rq);
     }
     sqlite3_finalize(stmt);
-
-    // for (const auto& song : songs)
-    //     printf("%ld => %s - %s [%s]\n", song.id, song.name.c_str(), song.byArtist.c_str(), song.filename.c_str());
 
     PlaybackState state;
     state.metadata = nullptr;
@@ -349,10 +357,6 @@ int main() {
 
     HoverInput hovers;
     hovers.songId = -1;
-
-    Font fonts[1];
-    fonts[0] = LoadFontEx("resources/Roboto-Regular.ttf", 48, 0, 400);
-    SetTextureFilter(fonts[0].texture, TEXTURE_FILTER_BILINEAR);
 
     Clay_SetMeasureTextFunction(FTMeasureText, reinterpret_cast<FT_Face>(face));
 
@@ -391,11 +395,14 @@ int main() {
         BeginDrawing();
         ClearBackground(BLACK);
         RenderFrame(renderCommands, face);
+        // DrawTexture(rlTexture, 0, 0, RAYWHITE);
         EndDrawing();
     }
 
     delete[] playbackTime.buffer;
     delete[] trackLength.buffer;
+
+    raqm_destroy(rq);
 
     FT_Done_Face(face);
     FT_Done_FreeType(ft);
