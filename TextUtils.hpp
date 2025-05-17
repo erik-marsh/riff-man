@@ -13,11 +13,14 @@
 
 void FTPrintError(int error);
 
-class TGAImage {
- public:
-    //
- private:
-    //
+struct TGAImage {
+    TGAImage(int width, int height);
+
+    int OffsetOf(int x, int y) const;
+
+    std::vector<uint8_t> buffer;
+    int width;
+    int height;
 };
 
 class DynamicText {

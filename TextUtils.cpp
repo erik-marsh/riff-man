@@ -19,6 +19,21 @@ constexpr bool DRAW_DEBUG =
     false;
 #endif
 
+TGAImage::TGAImage(int w, int h)
+    : width(w), height(h) {
+    buffer = std::vector<uint8_t>(4 * width * height + 18, 0);
+    buffer[2]  = 2;                      // Non-compressed true color
+    buffer[12] = width & 0x00FF;         // TGA is a little-endian format
+    buffer[13] = (width & 0xFF00) >> 8;
+    buffer[14] = height & 0x00FF;
+    buffer[15] = (height & 0xFF00) >> 8;    
+    buffer[16] = 32;                     // 32 bits per pixel (BGRA)
+}
+
+int TGAImage::OffsetOf(int x, int y) const {
+    return (4 * y * width) + (4 * x) + 18;
+}
+
 DynamicText::DynamicText()
     : m_width(0), m_height(0) {
     std::memset(&m_texture, 0, sizeof(m_texture));
@@ -101,18 +116,8 @@ void DynamicText::LoadText(std::string_view str, FT_Face face, raqm_t* rq,
     yBaseline >>= 6;
     m_width >>= 6;
     m_height = (yHi - yLo) >> 6;
-    auto m_bitmap = std::vector<uint8_t>(4 * m_width * m_height + 18, 0);
-    const auto OffsetOf = [this](int x, int y) {
-        return (4 * y * m_width) + (4 * x) + 18;
-    };
 
-    // Set TGA header information
-    m_bitmap[2] = 2;                        // Non-compressed true color
-    m_bitmap[12] = m_width & 0x00FF;        // TGA is a little-endian format
-    m_bitmap[13] = (m_width & 0xFF00) >> 8;
-    m_bitmap[14] = m_height & 0x00FF;
-    m_bitmap[15] = (m_height & 0xFF00) >> 8;    
-    m_bitmap[16] = 32;                      // 32 bits per pixel (BGRA)
+    TGAImage bitmap(m_width, m_height);
 
     // TODO: add debug info back in
 
@@ -139,20 +144,20 @@ void DynamicText::LoadText(std::string_view str, FT_Face face, raqm_t* rq,
                 if (y >= m_height || y < 0) continue;
 
                 // TODO: could we just set the alpha to the bitmap value?
-                const int outOffset = OffsetOf(x, y);
+                const int outOffset = bitmap.OffsetOf(x, y);
                 const int bitmapOffset = bmp.width * by + bx;
 
                 // NOTE: the difference between these two implmentations
                 //       actually changes the look and feel substantially.
                 //       first is thinner, second is stockier
-                // m_bitmap[outOffset + 0] |= bmp.buffer[bitmapOffset];
-                // m_bitmap[outOffset + 1] |= bmp.buffer[bitmapOffset];
-                // m_bitmap[outOffset + 2] |= bmp.buffer[bitmapOffset];
-                // m_bitmap[outOffset + 3] |= bmp.buffer[bitmapOffset];
-                m_bitmap[outOffset + 0] |= 0xFF; 
-                m_bitmap[outOffset + 1] |= 0xFF; 
-                m_bitmap[outOffset + 2] |= 0xFF; 
-                m_bitmap[outOffset + 3] |= bmp.buffer[bitmapOffset];
+                // bitmap.buffer[outOffset + 0] |= bmp.buffer[bitmapOffset];
+                // bitmap.buffer[outOffset + 1] |= bmp.buffer[bitmapOffset];
+                // bitmap.buffer[outOffset + 2] |= bmp.buffer[bitmapOffset];
+                // bitmap.buffer[outOffset + 3] |= bmp.buffer[bitmapOffset];
+                bitmap.buffer[outOffset + 0] |= 0xFF; 
+                bitmap.buffer[outOffset + 1] |= 0xFF; 
+                bitmap.buffer[outOffset + 2] |= 0xFF; 
+                bitmap.buffer[outOffset + 3] |= bmp.buffer[bitmapOffset];
             }
         }
 
@@ -161,7 +166,7 @@ void DynamicText::LoadText(std::string_view str, FT_Face face, raqm_t* rq,
 
     // TODO: raylib lets you draw to Images directly
     //       could replace the need for tga encoding maybe?
-    Image image = LoadImageFromMemory(".tga", m_bitmap.data(), m_bitmap.size());
+    Image image = LoadImageFromMemory(".tga", bitmap.buffer.data(), bitmap.buffer.size());
     m_texture = LoadTextureFromImage(image);
     UnloadImage(image);
 
@@ -252,16 +257,7 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
     const FT_Pos atlasWidth = maxWidth * numCols;
     const FT_Pos atlasHeight = maxHeight * numRows;
 
-    std::vector<uint8_t> bitmap(4 * atlasWidth * atlasHeight + 18, 0);
-    const auto OffsetOf = [atlasWidth](int x, int y) {
-        return (4 * y * atlasWidth) + (4 * x) + 18;
-    };
-    bitmap[2] = 2;                              // Non-compressed true color
-    bitmap[12] = atlasWidth & 0x00FF;           // TGA is a little-endian format
-    bitmap[13] = (atlasWidth & 0xFF00) >> 8;
-    bitmap[14] = atlasHeight & 0x00FF;
-    bitmap[15] = (atlasHeight & 0xFF00) >> 8;    
-    bitmap[16] = 32;                            // 32 bits per pixel (BGRA)
+    TGAImage bitmap(atlasWidth, atlasHeight);
 
     // 2. draw freetype bitmaps and mark their positions
     m_glyphLocs.resize(charMax - charMin + 1);
@@ -287,13 +283,13 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
                 // the TGA image is a "y-down" system
                 // whereas the FreeType bitmap is a "y-up" system
                 const uint y = yOrigin + (bmp.rows - by - 1);
-                const uint outOffset = OffsetOf(x, y);
+                const uint outOffset = bitmap.OffsetOf(x, y);
                 const uint bitmapOffset = bmp.width * by + bx;
 
-                bitmap[outOffset + 0] |= 0xFF; 
-                bitmap[outOffset + 1] |= 0xFF; 
-                bitmap[outOffset + 2] |= 0xFF; 
-                bitmap[outOffset + 3] |= bmp.buffer[bitmapOffset];
+                bitmap.buffer[outOffset + 0] |= 0xFF; 
+                bitmap.buffer[outOffset + 1] |= 0xFF; 
+                bitmap.buffer[outOffset + 2] |= 0xFF; 
+                bitmap.buffer[outOffset + 3] |= bmp.buffer[bitmapOffset];
             }
         }
 
@@ -311,66 +307,66 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
             for (uint j = m_glyphLocs[ch].penOffsetX; j < maxWidth; j++) {
                 const uint baselineY = m_glyphLocs[ch].y + m_glyphLocs[ch].penOffsetY;
                 const uint baselineX = m_glyphLocs[ch].x + j;
-                const uint offset = OffsetOf(baselineX, baselineY);
-                if (offset >= bitmap.size())
+                const uint offset = bitmap.OffsetOf(baselineX, baselineY);
+                if (offset >= bitmap.buffer.size())
                     break;
 
-                bitmap[offset + 1] = 0xFF;
-                bitmap[offset + 3] = 0xFF;
+                bitmap.buffer[offset + 1] = 0xFF;
+                bitmap.buffer[offset + 3] = 0xFF;
             }
 
             // [green, dotted] draw x = left bearing
             for (uint j = m_glyphLocs[ch].y; j < m_glyphLocs[ch].y + maxHeight; j += 2) {
                 const uint x = m_glyphLocs[ch].x + m_glyphLocs[ch].penOffsetX;
-                const uint offset = OffsetOf(x, j);
-                if (offset >= bitmap.size())
+                const uint offset = bitmap.OffsetOf(x, j);
+                if (offset >= bitmap.buffer.size())
                     break;
 
-                bitmap[offset + 0] = 0x00;
-                bitmap[offset + 1] = 0xFF;
-                bitmap[offset + 2] = 0x00;
-                bitmap[offset + 3] = 0xFF;
+                bitmap.buffer[offset + 0] = 0x00;
+                bitmap.buffer[offset + 1] = 0xFF;
+                bitmap.buffer[offset + 2] = 0x00;
+                bitmap.buffer[offset + 3] = 0xFF;
             }
 
             // [red] draw bounding box (?)
             for (uint j = m_glyphLocs[ch].x; j < m_glyphLocs[ch].x + m_glyphLocs[ch].width; j++) {
                 const uint yLo = m_glyphLocs[ch].y;
                 const uint yHi = m_glyphLocs[ch].y + m_glyphLocs[ch].height - 1;
-                const uint offsetLo = OffsetOf(j, yLo);
-                const uint offsetHi = OffsetOf(j, yHi);
-                if (offsetLo >= bitmap.size() || offsetHi >= bitmap.size())
+                const uint offsetLo = bitmap.OffsetOf(j, yLo);
+                const uint offsetHi = bitmap.OffsetOf(j, yHi);
+                if (offsetLo >= bitmap.buffer.size() || offsetHi >= bitmap.buffer.size())
                     break;
 
-                bitmap[offsetLo + 0] = 0x00;
-                bitmap[offsetLo + 1] = 0x00;
-                bitmap[offsetLo + 2] = 0xFF;
-                bitmap[offsetLo + 3] = 0xFF;
-                bitmap[offsetHi + 0] = 0x00;
-                bitmap[offsetHi + 1] = 0x00;
-                bitmap[offsetHi + 2] = 0xFF;
-                bitmap[offsetHi + 3] = 0xFF;
+                bitmap.buffer[offsetLo + 0] = 0x00;
+                bitmap.buffer[offsetLo + 1] = 0x00;
+                bitmap.buffer[offsetLo + 2] = 0xFF;
+                bitmap.buffer[offsetLo + 3] = 0xFF;
+                bitmap.buffer[offsetHi + 0] = 0x00;
+                bitmap.buffer[offsetHi + 1] = 0x00;
+                bitmap.buffer[offsetHi + 2] = 0xFF;
+                bitmap.buffer[offsetHi + 3] = 0xFF;
             }
             for (uint j = m_glyphLocs[ch].y; j < m_glyphLocs[ch].y + m_glyphLocs[ch].height; j++) {
                 const uint xLo = m_glyphLocs[ch].x;
                 const uint xHi = m_glyphLocs[ch].x + m_glyphLocs[ch].width - 1;
-                const uint offsetLo = OffsetOf(xLo, j);
-                const uint offsetHi = OffsetOf(xHi, j);
-                if (offsetLo >= bitmap.size() || offsetHi >= bitmap.size())
+                const uint offsetLo = bitmap.OffsetOf(xLo, j);
+                const uint offsetHi = bitmap.OffsetOf(xHi, j);
+                if (offsetLo >= bitmap.buffer.size() || offsetHi >= bitmap.buffer.size())
                     break;
 
-                bitmap[offsetLo + 0] = 0x00;
-                bitmap[offsetLo + 1] = 0x00;
-                bitmap[offsetLo + 2] = 0xFF;
-                bitmap[offsetLo + 3] = 0xFF;
-                bitmap[offsetHi + 0] = 0x00;
-                bitmap[offsetHi + 1] = 0x00;
-                bitmap[offsetHi + 2] = 0xFF;
-                bitmap[offsetHi + 3] = 0xFF;
+                bitmap.buffer[offsetLo + 0] = 0x00;
+                bitmap.buffer[offsetLo + 1] = 0x00;
+                bitmap.buffer[offsetLo + 2] = 0xFF;
+                bitmap.buffer[offsetLo + 3] = 0xFF;
+                bitmap.buffer[offsetHi + 0] = 0x00;
+                bitmap.buffer[offsetHi + 1] = 0x00;
+                bitmap.buffer[offsetHi + 2] = 0xFF;
+                bitmap.buffer[offsetHi + 3] = 0xFF;
             }
         }
     }
 
-    Image image = LoadImageFromMemory(".tga", bitmap.data(), bitmap.size());
+    Image image = LoadImageFromMemory(".tga", bitmap.buffer.data(), bitmap.buffer.size());
     m_texture = LoadTextureFromImage(image);
     UnloadImage(image);
 
