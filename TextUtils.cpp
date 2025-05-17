@@ -4,6 +4,14 @@
 #include <cstring>
 #include <limits>
 
+void FTPrintError(FT_Error error) {
+#undef FTERRORS_H_
+#define FT_ERRORDEF(err, errInt, str) case err: printf("FreeType: %s\n", str); break;
+#define FT_ERROR_START_LIST switch(error) {
+#define FT_ERROR_END_LIST default: printf("FreeType: Unknown error.\n"); break; }
+#include FT_ERRORS_H
+}
+
 constexpr bool DRAW_DEBUG = 
 #ifdef RIFF_MAN_DEBUG_FONTS
     true;
@@ -168,7 +176,6 @@ DynamicText::~DynamicText() {
 
 int DynamicText::Width() const { return m_width; }
 int DynamicText::Height() const { return m_height; }
-// const std::vector<uint8_t>& DynamicText::Bitmap() const { return m_bitmap; }
 Clay_Dimensions DynamicText::ClayDimensions() const {
     return {
         .width = static_cast<float>(m_width),
@@ -177,28 +184,35 @@ Clay_Dimensions DynamicText::ClayDimensions() const {
 }
 Texture& DynamicText::RaylibTexture() { return m_texture; }
 
-ASCIIFontAtlas::ASCIIFontAtlas() {
+ASCIIFontAtlas::ASCIIFontAtlas() 
+    : m_maxAscent(-1) {
     std::memset(&m_texture, 0, sizeof(m_texture));
 }
 
-ASCIIFontAtlas::ASCIIFontAtlas(const ASCIIFontAtlas& other) {
+ASCIIFontAtlas::ASCIIFontAtlas(const ASCIIFontAtlas& other)
+    : m_maxAscent(other.m_maxAscent), m_glyphLocs(other.m_glyphLocs) {
     Image copy = LoadImageFromTexture(other.m_texture);
     m_texture = LoadTextureFromImage(copy);
     UnloadImage(copy);
 }
 
 ASCIIFontAtlas::ASCIIFontAtlas(ASCIIFontAtlas&& other)
-    : m_texture(other.m_texture) {}
+    : m_texture(other.m_texture), m_maxAscent(other.m_maxAscent),
+      m_glyphLocs(std::move(other.m_glyphLocs)) {}
 
 ASCIIFontAtlas& ASCIIFontAtlas::operator=(const ASCIIFontAtlas& other) {
     Image copy = LoadImageFromTexture(other.m_texture);
     m_texture = LoadTextureFromImage(copy);
+    m_maxAscent = other.m_maxAscent;
+    m_glyphLocs = other.m_glyphLocs;
     UnloadImage(copy);
     return *this;
 }
 
 ASCIIFontAtlas& ASCIIFontAtlas::operator=(ASCIIFontAtlas&& other) {
     m_texture = other.m_texture;
+    m_maxAscent = other.m_maxAscent;
+    m_glyphLocs = std::move(other.m_glyphLocs);
     return *this;
 }
 
@@ -212,11 +226,7 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
     // create ASCII-ish font atlas as a default rendering fallback
     // characters of interest are 0x20-0x7E
     // question mark will be the "unknown character marker" (0x3F)
-    // 1. figure out texture size
-    // idk lets do rows of 16 or something
-    // i *suppose* the closer to square a texture is the better it is for sampling
-    constexpr char charMin = 0x20;
-    constexpr char charMax = 0x7E;
+    // cols and rows are pretty much an arbitrary decision
     constexpr char numCols = 16;
     constexpr char numRows = 6;
 
@@ -227,7 +237,7 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
         const FT_UInt glyphIndex = FT_Get_Char_Index(face, i);
         FT_Error err = FT_Load_Glyph(face, glyphIndex, FT_LOAD_DEFAULT);
         if (err) {
-            // FTPrintError(err);
+            FTPrintError(err);
             return false;
         }
         const auto& metrics = face->glyph->metrics;
@@ -254,20 +264,15 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
     bitmap[16] = 32;                            // 32 bits per pixel (BGRA)
 
     // 2. draw freetype bitmaps and mark their positions
-    constexpr auto ASCIIToGlyph = [](char ch) -> char {
-        constexpr char fallback = '?' - charMin;
-        if (ch < charMin) return fallback;
-        if (ch > charMax) return fallback;
-        return ch - charMin;
-    };
-    std::array<AtlasGlyph, charMax - charMin + 1> glyphLocs;
+    m_glyphLocs.resize(charMax - charMin + 1);
+    m_maxAscent = -1;
     using uint = unsigned int;
     for (char i = charMin ; i <= charMax; i++) {
         const char ch = ASCIIToGlyph(i);
         const uint row = ch / numCols;
         const uint col = ch % numCols;
         const uint xOrigin = col * maxWidth;
-        const uint yOrigin = (numRows - row - 1) * maxHeight;
+        const uint yOrigin = row * maxHeight;
 
         const FT_UInt glyphIndex = FT_Get_Char_Index(face, i);
         FT_Load_Glyph(face, glyphIndex, FT_LOAD_DEFAULT);
@@ -292,27 +297,35 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
             }
         }
 
-        glyphLocs[ch].x = xOrigin;
-        glyphLocs[ch].y = yOrigin;
-        glyphLocs[ch].width = bmp.width;
-        glyphLocs[ch].height = bmp.rows;
-        glyphLocs[ch].penOffsetX = glyph->bitmap_left;
-        glyphLocs[ch].penOffsetY = bmp.rows - glyph->bitmap_top;
+        m_glyphLocs[ch].x = xOrigin;
+        m_glyphLocs[ch].y = yOrigin;
+        m_glyphLocs[ch].width = bmp.width;
+        m_glyphLocs[ch].height = bmp.rows;
+        m_glyphLocs[ch].penOffsetX = glyph->bitmap_left;
+        m_glyphLocs[ch].penOffsetY = bmp.rows - glyph->bitmap_top;
+
+        m_maxAscent = std::max(m_maxAscent, glyph->bitmap_top);
 
         if constexpr (DRAW_DEBUG) {
             // [green] draw baseline of each glyph
-            for (uint j = glyphLocs[ch].penOffsetX; j < maxWidth; j++) {
-                const uint baselineY = glyphLocs[ch].y + glyphLocs[ch].penOffsetY;
-                const uint baselineX = glyphLocs[ch].x + j;
-                const uint tgaOffset = OffsetOf(baselineX, baselineY);
-                bitmap[tgaOffset + 1] = 0xFF;
-                bitmap[tgaOffset + 3] = 0xFF;
+            for (uint j = m_glyphLocs[ch].penOffsetX; j < maxWidth; j++) {
+                const uint baselineY = m_glyphLocs[ch].y + m_glyphLocs[ch].penOffsetY;
+                const uint baselineX = m_glyphLocs[ch].x + j;
+                const uint offset = OffsetOf(baselineX, baselineY);
+                if (offset >= bitmap.size())
+                    break;
+
+                bitmap[offset + 1] = 0xFF;
+                bitmap[offset + 3] = 0xFF;
             }
 
             // [green, dotted] draw x = left bearing
-            for (uint j = glyphLocs[ch].y; j < glyphLocs[ch].y + maxHeight; j += 2) {
-                const uint x = glyphLocs[ch].x + glyphLocs[ch].penOffsetX;
+            for (uint j = m_glyphLocs[ch].y; j < m_glyphLocs[ch].y + maxHeight; j += 2) {
+                const uint x = m_glyphLocs[ch].x + m_glyphLocs[ch].penOffsetX;
                 const uint offset = OffsetOf(x, j);
+                if (offset >= bitmap.size())
+                    break;
+
                 bitmap[offset + 0] = 0x00;
                 bitmap[offset + 1] = 0xFF;
                 bitmap[offset + 2] = 0x00;
@@ -320,11 +333,14 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
             }
 
             // [red] draw bounding box (?)
-            for (uint j = glyphLocs[ch].x; j < glyphLocs[ch].x + glyphLocs[ch].width; j++) {
-                const uint yLo = glyphLocs[ch].y;
-                const uint yHi = glyphLocs[ch].y + glyphLocs[ch].height - 1;
+            for (uint j = m_glyphLocs[ch].x; j < m_glyphLocs[ch].x + m_glyphLocs[ch].width; j++) {
+                const uint yLo = m_glyphLocs[ch].y;
+                const uint yHi = m_glyphLocs[ch].y + m_glyphLocs[ch].height - 1;
                 const uint offsetLo = OffsetOf(j, yLo);
                 const uint offsetHi = OffsetOf(j, yHi);
+                if (offsetLo >= bitmap.size() || offsetHi >= bitmap.size())
+                    break;
+
                 bitmap[offsetLo + 0] = 0x00;
                 bitmap[offsetLo + 1] = 0x00;
                 bitmap[offsetLo + 2] = 0xFF;
@@ -334,11 +350,14 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
                 bitmap[offsetHi + 2] = 0xFF;
                 bitmap[offsetHi + 3] = 0xFF;
             }
-            for (uint j = glyphLocs[ch].y; j < glyphLocs[ch].y + glyphLocs[ch].height; j++) {
-                const uint xLo = glyphLocs[ch].x;
-                const uint xHi = glyphLocs[ch].x + glyphLocs[ch].width - 1;
+            for (uint j = m_glyphLocs[ch].y; j < m_glyphLocs[ch].y + m_glyphLocs[ch].height; j++) {
+                const uint xLo = m_glyphLocs[ch].x;
+                const uint xHi = m_glyphLocs[ch].x + m_glyphLocs[ch].width - 1;
                 const uint offsetLo = OffsetOf(xLo, j);
                 const uint offsetHi = OffsetOf(xHi, j);
+                if (offsetLo >= bitmap.size() || offsetHi >= bitmap.size())
+                    break;
+
                 bitmap[offsetLo + 0] = 0x00;
                 bitmap[offsetLo + 1] = 0x00;
                 bitmap[offsetLo + 2] = 0xFF;
@@ -358,5 +377,17 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
     return true;
 }
 
-void ASCIIFontAtlas::DrawString(std::string_view str, raqm_t* rq) const {}
 Texture& ASCIIFontAtlas::RaylibTexture() { return m_texture; }
+
+int ASCIIFontAtlas::GetMaxAscent() const { return m_maxAscent; }
+
+const AtlasGlyph& ASCIIFontAtlas::GetGlyphLocation(char ch) const {
+    const char offset = ASCIIToGlyph(ch);
+    return m_glyphLocs[offset];
+}
+
+constexpr char ASCIIFontAtlas::ASCIIToGlyph(char ch) {
+    if (ch < charMin) return fallback;
+    if (ch > charMax) return fallback;
+    return ch - charMin;
+}

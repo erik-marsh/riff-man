@@ -11,6 +11,8 @@
 #include <raqm.h>
 #include <raylib.h>
 
+void FTPrintError(int error);
+
 class TGAImage {
  public:
     //
@@ -64,9 +66,17 @@ class ASCIIFontAtlas {
 
     bool LoadGlyphs(FT_Face face);
 
-    void DrawString(std::string_view str, raqm_t* rq) const;
     Texture& RaylibTexture();
+    int GetMaxAscent() const;
+    const AtlasGlyph& GetGlyphLocation(char ch) const;
 
  private:
+    static constexpr char charMin = 0x20;
+    static constexpr char charMax = 0x7E;
+    static constexpr char fallback = '?' - charMin;
+    static constexpr char ASCIIToGlyph(char ch);
+
     Texture m_texture;
+    int m_maxAscent;  // used to find the baseline
+    std::vector<AtlasGlyph> m_glyphLocs;
 };

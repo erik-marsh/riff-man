@@ -40,6 +40,7 @@ target_compile_options(riff-man PRIVATE
     -O2
     -g
     -Wshadow
+    #-DRIFF_MAN_DEBUG_FONTS
 )
 target_include_directories(riff-man PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/raylib/src/

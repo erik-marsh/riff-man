@@ -19,6 +19,7 @@
 
 #include "Renderer.hpp"
 #include "TextUtils.hpp"
+#include "Casts.hpp"
 
 // parallel to what will be the database entry for a song
 // basing this schema partially off of https://schema.org/MusicRecording
@@ -62,28 +63,13 @@ struct StringBuffer {
 StringBuffer playbackTime;
 StringBuffer trackLength;
 
+// TODO: does not cleanly go into Casts.hpp because of my StringBuffer struct
 namespace casts::clay {
-    constexpr Clay_Vector2 Vector2(Vector2 v) {
-        return { .x = v.x, .y = v.y };
-    }
-
-    constexpr Clay_String String(const std::string& str) {
-        return {
-            .length = static_cast<int32_t>(str.size()),
-            .chars = str.data() };
-    }
-    
-    constexpr Clay_String String(std::string_view str) {
-        return {
-            .length = static_cast<int32_t>(str.size()),
-            .chars = str.data() };
-    }
-    
-    constexpr Clay_String String(const StringBuffer& str) {
-        return {
-            .length = static_cast<int32_t>(str.size),
-            .chars = str.buffer };
-    }
+constexpr Clay_String String(const StringBuffer& str) {
+    return {
+        .length = static_cast<int32_t>(str.size),
+        .chars = str.buffer };
+}
 }
 
 // If we declare our layout in a function,
@@ -110,8 +96,6 @@ struct LayoutInfo {
 };
 
 LayoutInfo MakeLayout(const PlaybackState& state, std::vector<SongEntry>& songs) {
-    // Clay internally caches font configs, so this isn't quite the best approach
-    // static Clay_TextElementConfig bodyText{ .textColor = white, .fontSize = 24 };
     // TODO: check if things need to be static constexpr
     constexpr Clay_Color white     { 255, 255, 255, 255 };
     constexpr Clay_Color black     { 0, 0, 0, 255 };
@@ -151,7 +135,8 @@ LayoutInfo MakeLayout(const PlaybackState& state, std::vector<SongEntry>& songs)
     };
     constexpr Clay_ElementDeclaration progressLayout{
         .layout = {
-            .sizing = { .width = CLAY_SIZING_PERCENT(0.65f), .height = CLAY_SIZING_GROW() } }
+            .sizing = { .width = CLAY_SIZING_PERCENT(0.65f), .height = CLAY_SIZING_GROW() },
+            .childAlignment = centered }
     };
 
     LayoutInfo ret;
@@ -211,15 +196,15 @@ LayoutInfo MakeLayout(const PlaybackState& state, std::vector<SongEntry>& songs)
         }
         CLAY(controlLayout) {
             CLAY(timeLayout) {
-                // TimeFormat(state.currTime, playbackTime);
-                // CLAY_TEXT(casts::clay::String(playbackTime), &bodyText);
+                TimeFormat(state.currTime, playbackTime);
+                CLAY_TEXT(casts::clay::String(playbackTime), CLAY_TEXT_CONFIG({}));
             }
             CLAY(progressLayout) {
                 MakeProgressBar(state.currTime, state.duration);
             }
             CLAY(timeLayout) {
-                // TimeFormat(state.duration, trackLength);
-                // CLAY_TEXT(casts::clay::String(trackLength), &bodyText);
+                TimeFormat(state.duration, trackLength);
+                CLAY_TEXT(casts::clay::String(trackLength), CLAY_TEXT_CONFIG({}));
             }
         }
     }
@@ -308,6 +293,9 @@ int main() {
         return 1;
     }
 
+    ASCIIFontAtlas atlas;
+    atlas.LoadGlyphs(face);
+
     raqm_t* rq = raqm_create();
 
     bool debugEnabled = false;
@@ -369,7 +357,7 @@ int main() {
 
     long hoveredSongId = -1;
 
-    Clay_SetMeasureTextFunction(FTMeasureText, reinterpret_cast<FT_Face>(face));
+    Clay_SetMeasureTextFunction(MeasureText, reinterpret_cast<FT_Face>(face));
 
     while (!WindowShouldClose()) {
         // Phase 1: input state updates
@@ -410,7 +398,7 @@ int main() {
         // Phase 4: render
         BeginDrawing();
         ClearBackground(BLACK);
-        RenderFrame(renderCommands, face);
+        RenderFrame(renderCommands, face, atlas);
         EndDrawing();
     }
 
