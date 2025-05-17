@@ -19,6 +19,10 @@ constexpr bool DRAW_DEBUG =
     false;
 #endif
 
+
+////////////////////////////////////////////////////////////////////////////////
+// TGAImage
+////////////////////////////////////////////////////////////////////////////////
 TGAImage::TGAImage(int w, int h)
     : width(w), height(h) {
     buffer = std::vector<uint8_t>(4 * width * height + 18, 0);
@@ -34,6 +38,10 @@ int TGAImage::OffsetOf(int x, int y) const {
     return (4 * y * width) + (4 * x) + 18;
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
+// DynamicText
+////////////////////////////////////////////////////////////////////////////////
 DynamicText::DynamicText()
     : m_width(0), m_height(0) {
     std::memset(&m_texture, 0, sizeof(m_texture));
@@ -180,14 +188,33 @@ DynamicText::~DynamicText() {
 }
 
 int DynamicText::Width() const { return m_width; }
+
 int DynamicText::Height() const { return m_height; }
+
 Clay_Dimensions DynamicText::ClayDimensions() const {
     return {
         .width = static_cast<float>(m_width),
         .height = static_cast<float>(m_height)
     };
 }
+
 Texture& DynamicText::RaylibTexture() { return m_texture; }
+
+
+////////////////////////////////////////////////////////////////////////////////
+// ASCIIFontAtlas
+////////////////////////////////////////////////////////////////////////////////
+
+// Some helpers for this class that don't need to be exposed anywhere
+constexpr char charMin = 0x20;
+constexpr char charMax = 0x7E;
+constexpr char fallback = '?' - charMin;
+
+constexpr char ASCIIToGlyph(char ch) {
+    if (ch < charMin) return fallback;
+    if (ch > charMax) return fallback;
+    return ch - charMin;
+}
 
 ASCIIFontAtlas::ASCIIFontAtlas() 
     : m_maxAscent(-1) {
@@ -382,8 +409,3 @@ const AtlasGlyph& ASCIIFontAtlas::GetGlyphLocation(char ch) const {
     return m_glyphLocs[offset];
 }
 
-constexpr char ASCIIFontAtlas::ASCIIToGlyph(char ch) {
-    if (ch < charMin) return fallback;
-    if (ch > charMax) return fallback;
-    return ch - charMin;
-}
