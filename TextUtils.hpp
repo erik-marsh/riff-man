@@ -19,10 +19,11 @@ struct TGAImage {
     int OffsetOf(int x, int y) const;
 
     std::vector<uint8_t> buffer;
-    int width;
-    int height;
+    unsigned int width;
+    unsigned int height;
 };
 
+struct TextRenderContext;
 class DynamicText {
  public:
     DynamicText();
@@ -32,7 +33,7 @@ class DynamicText {
     DynamicText& operator=(DynamicText&& other);
     ~DynamicText();
 
-    void LoadText(std::string_view str, FT_Face face, raqm_t* rq,
+    void LoadText(std::string_view str, TextRenderContext& textCtx,
                   const char* langHint = nullptr);
 
     int Width() const;
@@ -71,10 +72,19 @@ class ASCIIFontAtlas {
 
     Texture& RaylibTexture();
     int GetMaxAscent() const;
+    int GetMaxHeight() const;
     const AtlasGlyph& GetGlyphLocation(char ch) const;
 
  private:
     Texture m_texture;
-    int m_maxAscent;  // used to find the baseline
+    int m_maxAscent;  // used to find the baseline (in pixels)
+    int m_maxHeight;  // max glyph height (in pixels)
     std::vector<AtlasGlyph> m_glyphLocs;
 };
+
+struct TextRenderContext {
+    FT_Face face;  // FT_Face is a typedef of a pointer
+    ASCIIFontAtlas atlas;
+    raqm_t* rq;
+};
+

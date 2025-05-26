@@ -150,7 +150,8 @@ LayoutInfo MakeLayout(const PlaybackState& state, std::vector<SongEntry>& songs)
                 .padding = CLAY_PADDING_ALL(16),
                 .childAlignment = centered },
             .backgroundColor = lightgray,
-            .cornerRadius = rounding
+            .cornerRadius = rounding,
+            .border = { .color = {255, 0, 0, 255}, .width = {1,1,1,1,1}  },
         };
         const Clay_ElementDeclaration imageConfig{
             .layout = {
@@ -244,11 +245,13 @@ void LogSQLiteCallback(void*, int errCode, const char* msg) {
 }
 
 int main() {
+    // Init Raylib
     // SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
     InitWindow(960, 540, "[Riff Man]");
     SetTargetFPS(60);
     InitAudioDevice();
 
+    // Init Clay
     const uint64_t clayArenaSize = Clay_MinMemorySize();
     Clay_Arena clayArena = Clay_CreateArenaWithCapacityAndMemory(clayArenaSize, malloc(clayArenaSize));
     Clay_ErrorHandler clayErr{
@@ -257,6 +260,7 @@ int main() {
     };
     Clay_Initialize(clayArena, GetScreenDimensions(), clayErr);
 
+    // Init sqlite
     sqlite3_config(SQLITE_CONFIG_LOG, LogSQLiteCallback, nullptr);
  
     constexpr int dbFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
@@ -272,6 +276,7 @@ int main() {
         return 1;
     }
 
+    // Init FreeType
     FT_Library ft;
     err = FT_Init_FreeType(&ft);
     if (err) {
@@ -279,26 +284,23 @@ int main() {
         return 1;
     }
 
-    FT_Face face;
-    err = FT_New_Face(ft, "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0, &face);
+    // Init text rendering utilities
+    TextRenderContext textCtx;
+    err = FT_New_Face(ft, "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0, &textCtx.face);
     if (err) {
         FTPrintError(err);
         return 1;
     }
 
     // TODO: this should not be hardcoded
-    err = FT_Set_Pixel_Sizes(face, 20, 20);
+    err = FT_Set_Pixel_Sizes(textCtx.face, 20, 20);
     if (err) {
         FTPrintError(err);
         return 1;
     }
 
-    ASCIIFontAtlas atlas;
-    atlas.LoadGlyphs(face);
-
-    raqm_t* rq = raqm_create();
-
-    bool debugEnabled = false;
+    textCtx.atlas.LoadGlyphs(textCtx.face);
+    textCtx.rq = raqm_create();
 
     playbackTime.buffer = new char[10];
     playbackTime.capacity = 10;
@@ -344,7 +346,7 @@ int main() {
         songs[i].fileFormat = AudioFormat::MP3;
         songs[i].name = ToString(sqlite3_column_text(stmt, 3));
         songs[i].byArtist = ToString(sqlite3_column_text(stmt, 4));
-        songs[i].text.LoadText(songs[i].name, face, rq);
+        songs[i].text.LoadText(songs[i].name, textCtx);
     }
     sqlite3_finalize(stmt);
 
@@ -357,13 +359,14 @@ int main() {
 
     long hoveredSongId = -1;
 
-    Clay_SetMeasureTextFunction(MeasureText, reinterpret_cast<FT_Face>(face));
+    Clay_SetMeasureTextFunction(MeasureText, &textCtx);
 
+    bool clayDebugEnabled = false;
     while (!WindowShouldClose()) {
         // Phase 1: input state updates
         if (IsKeyPressed(KEY_D)) {
-            debugEnabled = !debugEnabled;
-            Clay_SetDebugModeEnabled(debugEnabled);
+            clayDebugEnabled = !clayDebugEnabled;
+            Clay_SetDebugModeEnabled(clayDebugEnabled);
         }
 
         const auto mousePosition = casts::clay::Vector2(GetMousePosition());
@@ -398,16 +401,16 @@ int main() {
         // Phase 4: render
         BeginDrawing();
         ClearBackground(BLACK);
-        RenderFrame(renderCommands, face, atlas);
+        RenderFrame(renderCommands, textCtx);
         EndDrawing();
     }
 
     delete[] playbackTime.buffer;
     delete[] trackLength.buffer;
 
-    raqm_destroy(rq);
+    raqm_destroy(textCtx.rq);
 
-    FT_Done_Face(face);
+    FT_Done_Face(textCtx.face);
     FT_Done_FreeType(ft);
 
     CloseAudioDevice();

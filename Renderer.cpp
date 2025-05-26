@@ -1,59 +1,3 @@
-// Some notes from the FreeType "Glyph Conventions" article:
-// 
-// "points" are a physical unit, not a logical one
-// one point = 1/72 inches
-// pixel size = point size * dpi / 72
-//     these may be different for the x and y axis, too
-// so, right of the bat, measuring text is not an easy task necessarily
-// 
-// outline => the scalable version of a glyph
-//            outlines are defined as points on a discrete grid
-//            this grid is large enough that you can assume it is continuous
-//
-// glyphs have their own coordinate system:
-//   x axis: L to R
-//   y axis: bottom to top
-// the "em square" is a virtual canvas on which a glyph is drawn
-// it is useful for scaling text
-// fonts can indeed draw glyph segments outside of the em square 
-//
-// grid fitting is a thing
-// basically: there's a lot of transformations between coord systems going on
-// this causes issues, because screens are discrete pixel grids,
-// while fonts are typically curves on a continuous coordinate system
-//
-// BASICS OF LAYOUT
-// i will only be considering horizontal layouts here.
-//     I have never seen a UI in a vertical layout. sorry mongolia
-// baseline => a guide for glyph placement
-//             in horizontal layouts, glyphs sit on the baseline
-// pen position/origin => a virtual point on the baseline used to render a glyph
-// advance width => distance between two successive pen positions
-//                  ALWAYS POSITIVE, even in R->L scripts
-//                  there is such a thing as advance height, but that is only for vertical scripts
-// ascent => distance between baseline and highest outline point of a glyph
-//           always positive (Y IS UP)
-// descent => distance between baseline and lowest outline point of a glyph
-//           always negative (Y IS UP)
-// linegap => distance between two lines of text
-//            the proper baseline-to-baseline distance is (ascent - descent + linegap)
-// bounding box => of a glyph. self-explanatory
-// internal leading => space taken by stuff outside the em square (ascent - descent - em size)
-// external leading => linegap
-//
-// bearings =>
-//   left side => distance from pen pos to glyph's left bbox edge
-//   top side => distance from pen pos to glyph's top bbox edge
-//   right side => distance from right bbox edge to the advance width
-// glyph width => self-explanatory. can be derived from bbox values
-// glyph height => self-explanatory. can be derived from bbox values
-//
-// 26.6 refers to a fixed point encoding used by FreeType
-//     26 bit integer part, 6 bit fractional part
-//     hence the value of smallest magnitude is 1/(2^6) = 1/64
-//     therefore, any 26.6 value is interpreted as n/64ths of some unit
-//     this unit is not necessarily pixels... be vigilant
-
 #include "Renderer.hpp"
 
 #include <cmath>
@@ -72,124 +16,114 @@
 //       Thus the burden falls on us to know when Clay will wrap
 //       and we must adjust our measure accordingly.
 Clay_Dimensions MeasureText(Clay_StringSlice text, Clay_TextElementConfig*, void* userData) {
-    const char* lang = "en";
-    Clay_Dimensions ret{ .width = 0.0f, .height = 0.0f };
+    auto& textCtx = *reinterpret_cast<TextRenderContext*>(userData);
 
-    FT_Face face = reinterpret_cast<FT_Face>(userData);
-
-    raqm_t* rq = raqm_create();
-    raqm_set_text_utf8(rq, text.chars, text.length);  // hides a call to realloc 
-    raqm_set_freetype_face(rq, face);
-    raqm_set_par_direction(rq, RAQM_DIRECTION_LTR);
-    raqm_set_language(rq, lang, 0, text.length);
-    raqm_layout(rq);
+    raqm_clear_contents(textCtx.rq);
+    raqm_set_text_utf8(textCtx.rq, text.chars, text.length);
+    raqm_set_freetype_face(textCtx.rq, textCtx.face);
+    raqm_set_par_direction(textCtx.rq, RAQM_DIRECTION_LTR);
+    raqm_set_language(textCtx.rq, "en", 0, text.length);
+    raqm_layout(textCtx.rq);
 
     size_t count;
-    raqm_glyph_t* glyphs = raqm_get_glyphs(rq, &count);
+    raqm_glyph_t* glyphs = raqm_get_glyphs(textCtx.rq, &count);
+    if (count == 0)
+        return { 0.0f, 0.0f };
 
-    // TODO: I'm not sure if we need to know the pen's initial position when
-    //       measuring text, or if wa just need to consider only the texture's
-    //       width and height.
-    // TODO: we might be able to get away with setting the text height to the font size in pixels
+    // TODO: two things
+    //       * should we consider negative left bearings?
+    //         furthermore, what about the left bearing of glyph 0 in the first place?
+    //       * should the last loop iteration use the x_advance or the glyph width?
+    //         (i got a really nasty, incomprehensible bug last time i tried the latter, though...)
+
     unsigned int width = 0;
-    FT_Pos yLo = std::numeric_limits<FT_Pos>::max(); // TODO: see font descent maybe?
-    FT_Pos yHi = std::numeric_limits<FT_Pos>::min(); // TODO: similarly, ascent?
-    for (size_t i = 0; i < count; i++) {
-        FT_Load_Glyph(face, glyphs[i].index, FT_LOAD_DEFAULT);
-        yHi = std::max(yHi, face->glyph->metrics.horiBearingY);
-        yLo = std::min(yLo, face->glyph->metrics.horiBearingY - face->glyph->metrics.height);
-        
-        // TODO: how should negative left bearings be handled?
-        //       maybe just ignore it until it becomes a problem?
-        // TODO: you could add only the glyph width on the last iteration,
-        //              and that would reduce the size of the texture,
-        //              but for some incomprehensible reason that fucked up the whole loop
-        //              I still have no idea what went wrong.
-        if (i == 0)
-            width += face->glyph->metrics.horiBearingX;
-        width += glyphs[i].x_advance;
-    }
+    for (size_t i = 0; i < count; i++)
+        width += glyphs[i].x_advance >> 6; // shifting here matches the implementation in DrawTextASCII
 
-    raqm_destroy(rq);
-
-    // metrics need to be converted from 26.6 format
-    ret.width = static_cast<float>(width / 64);
-    ret.height = static_cast<float>((yHi - yLo) / 64);
-    return ret;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnarrowing"
+    return {
+        .width = width,
+        .height = textCtx.atlas.GetMaxHeight()  // this is already in pixels
+    };
+#pragma GCC diagnostic pop
 }
 
-void DrawTextASCII(ASCIIFontAtlas& atlas, FT_Face face, const char* text, int len, int x, int y) {
-    const Texture& tex = atlas.RaylibTexture();
+void DrawTextASCII(TextRenderContext& textCtx, const char* text, int len, int x, int y) {
+    const Texture& tex = textCtx.atlas.RaylibTexture();
 
-    raqm_t* rq = raqm_create();
-    raqm_set_text_utf8(rq, text, len);  // hides a call to realloc 
-    raqm_set_freetype_face(rq, face);
-    raqm_set_par_direction(rq, RAQM_DIRECTION_LTR);
-    raqm_set_language(rq, "en", 0, len);
-    raqm_layout(rq);
+    raqm_clear_contents(textCtx.rq);
+    raqm_set_text_utf8(textCtx.rq, text, len);
+    raqm_set_freetype_face(textCtx.rq, textCtx.face);
+    raqm_set_par_direction(textCtx.rq, RAQM_DIRECTION_LTR);
+    raqm_set_language(textCtx.rq, "en", 0, len);
+    raqm_layout(textCtx.rq);
 
     size_t count;
-    raqm_glyph_t* glyphs = raqm_get_glyphs(rq, &count);
+    raqm_glyph_t* glyphs = raqm_get_glyphs(textCtx.rq, &count);
+    if (count == 0)
+        return;
 
     for (size_t i = 0; i < count; i++) {
-        const AtlasGlyph& loc = atlas.GetGlyphLocation(text[i]);
+        const AtlasGlyph& loc = textCtx.atlas.GetGlyphLocation(text[i]);
         const int glyphAscent = loc.height - loc.penOffsetY;
 
-        Rectangle glyphSlice{
-            .x = static_cast<float>(loc.x),
-            .y = static_cast<float>(tex.height - (loc.y + loc.height)),
-            .width = static_cast<float>(loc.width),
-            .height = static_cast<float>(loc.height)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnarrowing"
+        const Rectangle glyphSlice{
+            .x = loc.x,
+            .y = tex.height - loc.y - loc.height,
+            .width = loc.width,
+            .height = loc.height
         };
-        Vector2 pos{
-            .x = static_cast<float>(x + loc.penOffsetX),
-            .y = static_cast<float>(y + (atlas.GetMaxAscent() - glyphAscent))
+        const Vector2 pos{
+            .x = x + loc.penOffsetX,
+            .y = y + (textCtx.atlas.GetMaxAscent() - glyphAscent)
         };
-        DrawTextureRec(tex, glyphSlice, pos, RAYWHITE);
+#pragma GCC diagnostic pop
 
-        x += glyphs[i].x_advance / 64;
+        DrawTextureRec(tex, glyphSlice, pos, WHITE);
+        x += glyphs[i].x_advance >> 6; 
     }
 }
 
 // I really don't foresee the bounds-checked get being necessary here.
 // (If I become a Rust dev in the next 5 years I'll eat my Suisei plushie)
-void RenderFrame(Clay_RenderCommandArray cmds, FT_Face face, ASCIIFontAtlas& atlas) {
+void RenderFrame(Clay_RenderCommandArray cmds, TextRenderContext& textCtx) {
     for (int i = 0; i < cmds.length; i++) { 
         const Clay_RenderCommand& cmd = *(Clay_RenderCommandArray_Get(&cmds, i));
         const Clay_BoundingBox& bb = cmd.boundingBox;
 
         switch (cmd.commandType) {
          case CLAY_RENDER_COMMAND_TYPE_TEXT: {
-            // const Clay_TextRenderData& text = cmd.renderData.text;
             const auto& str = cmd.renderData.text.stringContents;
-            DrawRectangle(bb.x, bb.y, bb.width, bb.height, RED);
-            DrawTextASCII(atlas, face, str.chars, str.length, bb.x, bb.y);
-            break;
-         }
+            // DrawRectangle(bb.x, bb.y, bb.width, bb.height, RED);
+            DrawTextASCII(textCtx, str.chars, str.length, bb.x, bb.y);
+         } break;
+
          case CLAY_RENDER_COMMAND_TYPE_IMAGE: {
             const auto& image = cmd.renderData.image;
+            const auto& imageTexture = *reinterpret_cast<Texture2D*>(image.imageData);
+
             const Vector2 origin{ bb.x, bb.y };
-            const Texture2D imageTexture = *reinterpret_cast<Texture2D*>(image.imageData);
             const float scale = bb.width / static_cast<float>(imageTexture.width);
             Color tint = casts::raylib::Color(image.backgroundColor);
             if (tint.r == 0 && tint.g == 0 && tint.b == 0 && tint.a == 0)
                 tint = Color{ 255, 255, 255, 255 };
+            // DrawRectangle(bb.x, bb.y, bb.width, bb.height, RED);
             DrawTextureEx(imageTexture, origin, 0, scale, tint);
-            break;
-         }
+         } break;
+
          case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
             // omitting the rounding does in fact cause issues here
-            const int bbx = static_cast<int>(std::roundf(bb.x));
-            const int bby = static_cast<int>(std::roundf(bb.y));
-            const int bbw = static_cast<int>(std::roundf(bb.width));
-            const int bbh = static_cast<int>(std::roundf(bb.height));
-            BeginScissorMode(bbx, bby, bbw, bbh); 
-            break;
-         }
+            BeginScissorMode(std::roundf(bb.x), std::roundf(bb.y),
+                             std::roundf(bb.width), std::roundf(bb.height)); 
+         } break;
+                                                      
          case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END: {
             EndScissorMode();
-            break;
-         }
+         } break;
+
          case CLAY_RENDER_COMMAND_TYPE_RECTANGLE: {
             const auto& config = cmd.renderData.rectangle;
             const Rectangle rect{ bb.x, bb.y, bb.width, bb.height };
@@ -202,79 +136,67 @@ void RenderFrame(Clay_RenderCommandArray cmds, FT_Face face, ASCIIFontAtlas& atl
             } else {
                 DrawRectangleRec(rect, color);
             }
-            break;
-         }
+         } break;
+
          // NOTE: borders are drawn IN the main rect, not outside of it
          case CLAY_RENDER_COMMAND_TYPE_BORDER: {
             const auto& border = cmd.renderData.border;
-            const Color color = casts::raylib::Color(border.color);
+            const auto& corner = border.cornerRadius;
+            const auto& width = border.width;
+            const auto color = casts::raylib::Color(border.color);
 
-            if (border.width.left > 0) {
-                const Rectangle rect{
-                    bb.x,
-                    bb.y + border.cornerRadius.topLeft,
-                    static_cast<float>(border.width.left),
-                    bb.height - border.cornerRadius.topLeft - border.cornerRadius.bottomLeft };
-                DrawRectangleRec(rect, color);
-            }
-            if (border.width.right > 0) {
-                const Rectangle rect{
-                    bb.x + bb.width - border.width.right,
-                    bb.y + border.cornerRadius.topRight,
-                    static_cast<float>(border.width.right),
-                    bb.height - border.cornerRadius.topRight - border.cornerRadius.bottomRight };
-                DrawRectangleRec(rect, color);
-            }
-            if (border.width.top > 0) {
-                const Rectangle rect{
-                    bb.x + border.cornerRadius.topLeft,
-                    bb.y,
-                    bb.width - border.cornerRadius.topLeft - border.cornerRadius.topRight,
-                    static_cast<float>(border.width.top) };
-                DrawRectangleRec(rect, color);
-            }
-            if (border.width.bottom > 0) {
-                const Rectangle rect{
-                    bb.x + border.cornerRadius.bottomLeft,
-                    bb.y + bb.height - border.width.bottom,
-                    bb.width - border.cornerRadius.bottomLeft - border.cornerRadius.bottomRight,
-                    static_cast<float>(border.width.bottom) };
-                DrawRectangleRec(rect, color);
-            }
-            if (border.cornerRadius.topLeft > 0) {
-                const Vector2 center{
-                    bb.x + border.cornerRadius.topLeft,
-                    bb.y + border.cornerRadius.topLeft };
-                const float innerRadius = border.cornerRadius.topLeft - border.width.top;
-                const float outerRadius = border.cornerRadius.topLeft;
-                DrawRing(center, innerRadius, outerRadius, 180.0f, 270.0f, 10, color);
-            }
-            if (border.cornerRadius.topRight > 0) {
-                const Vector2 center{
-                    bb.x + bb.width - border.cornerRadius.topRight,
-                    bb.y + border.cornerRadius.topRight };
-                const float innerRadius = border.cornerRadius.topRight - border.width.top;
-                const float outerRadius = border.cornerRadius.topRight;
-                DrawRing(center, innerRadius, outerRadius, 270.0f, 360.0f, 10, color);
-            }
-            if (border.cornerRadius.bottomLeft > 0) {
-                const Vector2 center{
-                    bb.x + border.cornerRadius.bottomLeft,
-                    bb.y + bb.height - border.cornerRadius.bottomLeft };
-                const float innerRadius = border.cornerRadius.bottomLeft - border.width.top;
-                const float outerRadius = border.cornerRadius.bottomLeft;
-                DrawRing(center, innerRadius, outerRadius, 90.0f, 180.0f, 10, color);
-            }
-            if (border.cornerRadius.bottomRight > 0) {
-                const Vector2 center{
-                    bb.x + bb.width - border.cornerRadius.bottomRight,
-                    bb.y + bb.height - border.cornerRadius.bottomRight };
-                const float innerRadius = border.cornerRadius.bottomRight - border.width.bottom;
-                const float outerRadius = border.cornerRadius.bottomRight;
-                DrawRing(center, innerRadius, outerRadius, 0.1f, 90.0f, 10, color);
-            }
-            break;
-         }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnarrowing"
+            const auto left = Rectangle{
+                .x = bb.x,
+                .y = bb.y + corner.topLeft,
+                .width = width.left,
+                .height = bb.height - corner.topLeft - corner.bottomLeft };
+            const auto right = Rectangle{
+                .x = bb.x + bb.width - width.right,
+                .y = bb.y + corner.topRight,
+                .width = width.right,
+                .height = bb.height - corner.topRight - corner.bottomRight };
+            const auto top = Rectangle{
+                .x = bb.x + corner.topLeft,
+                .y = bb.y,
+                .width = bb.width - corner.topLeft - corner.topRight,
+                .height = width.top };
+            const auto bottom = Rectangle{
+                .x = bb.x + corner.bottomLeft,
+                .y = bb.y + bb.height - width.bottom,
+                .width = bb.width - corner.bottomLeft - corner.bottomRight,
+                .height = width.bottom };
+#pragma GCC diagnostic pop
+
+            DrawRectangleRec(left, color);
+            DrawRectangleRec(right, color);
+            DrawRectangleRec(top, color);
+            DrawRectangleRec(bottom, color);
+
+            const Vector2 topLeft{
+                bb.x + corner.topLeft,
+                bb.y + corner.topLeft };
+            const Vector2 topRight{
+                bb.x + bb.width - corner.topRight,
+                bb.y + corner.topRight };
+            const Vector2 bottomLeft{
+                bb.x + corner.bottomLeft,
+                bb.y + bb.height - corner.bottomLeft };
+            const Vector2 bottomRight{
+                bb.x + bb.width - corner.bottomRight,
+                bb.y + bb.height - corner.bottomRight };
+
+            DrawRing(topLeft, corner.topLeft - width.top, corner.topLeft,
+                     180.0f, 270.0f, 10, color);
+            DrawRing(topRight, corner.topRight - width.top, corner.topRight,
+                     270.0f, 360.0f, 10, color);
+            DrawRing(bottomLeft, corner.bottomLeft - width.bottom, corner.bottomLeft,
+                     90.0f, 180.0f, 10, color);
+            DrawRing(bottomRight, corner.bottomRight - width.bottom, corner.bottomRight,
+                     0.1f, 90.0f, 10, color);
+         } break;
+
          default: {
             printf("Unhandled render command.\n");
          }
