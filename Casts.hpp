@@ -11,8 +11,7 @@
 #include <raylib.h>
 
 
-namespace casts {
-namespace clay {
+namespace casts::clay {
 namespace {
 
 constexpr Clay_Vector2 Vector2(Vector2 v) {
@@ -33,7 +32,7 @@ constexpr Clay_String String(std::string_view str) {
 }
 }
 
-namespace raylib {
+namespace casts::raylib {
 namespace {
 
 constexpr Color Color(const Clay_Color& color) {
@@ -49,7 +48,6 @@ constexpr Color Color(const Clay_Color& color) {
         .a = Transform(color.a) };
 }
 
-}
 }
 }
 
