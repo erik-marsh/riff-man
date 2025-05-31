@@ -24,67 +24,44 @@ struct TGAImage {
 };
 
 struct TextRenderContext;
-class DynamicText {
+Texture RenderText(std::string_view str, const TextRenderContext& textCtx,
+                   const char* langHint = nullptr);
+
+class ASCIIAtlas {
  public:
-    DynamicText();
-    DynamicText(const DynamicText& other);
-    DynamicText(DynamicText&& other);
-    DynamicText& operator=(const DynamicText& other);
-    DynamicText& operator=(DynamicText&& other);
-    ~DynamicText();
+    struct GlyphInfo {
+        unsigned int x;
+        unsigned int y;
+        unsigned int width;
+        unsigned int height;
+        unsigned int penOffsetX;
+        unsigned int penOffsetY;
+    };
 
-    void LoadText(std::string_view str, TextRenderContext& textCtx,
-                  const char* langHint = nullptr);
-
-    int Width() const;
-    int Height() const;
-    // const std::vector<uint8_t>& Bitmap() const;
-    Clay_Dimensions ClayDimensions() const;
-    Texture& RaylibTexture();
-
- private:
-    // std::string text;
-    int m_width;
-    int m_height;
-    // std::vector<uint8_t> m_bitmap;
-    Texture m_texture;
-};
-
-struct AtlasGlyph {
-    unsigned int x;
-    unsigned int y;
-    unsigned int width;
-    unsigned int height;
-    unsigned int penOffsetX;
-    unsigned int penOffsetY;
-};
-
-class ASCIIFontAtlas {
- public:
-    ASCIIFontAtlas();
-    ASCIIFontAtlas(const ASCIIFontAtlas& other);
-    ASCIIFontAtlas(ASCIIFontAtlas&& other);
-    ASCIIFontAtlas& operator=(const ASCIIFontAtlas& other);
-    ASCIIFontAtlas& operator=(ASCIIFontAtlas&& other);
-    ~ASCIIFontAtlas();
+    ASCIIAtlas();
+    ASCIIAtlas(const ASCIIAtlas& other);
+    ASCIIAtlas(ASCIIAtlas&& other);
+    ASCIIAtlas& operator=(const ASCIIAtlas& other);
+    ASCIIAtlas& operator=(ASCIIAtlas&& other);
+    ~ASCIIAtlas();
 
     bool LoadGlyphs(FT_Face face);
 
     Texture& RaylibTexture();
     int GetMaxAscent() const;
     int GetMaxHeight() const;
-    const AtlasGlyph& GetGlyphLocation(char ch) const;
+    const GlyphInfo& GetGlyphLocation(char ch) const;
 
  private:
     Texture m_texture;
     int m_maxAscent;  // used to find the baseline (in pixels)
     int m_maxHeight;  // max glyph height (in pixels)
-    std::vector<AtlasGlyph> m_glyphLocs;
+    std::vector<GlyphInfo> m_glyphLocs;
 };
 
 struct TextRenderContext {
     FT_Face face;  // FT_Face is a typedef of a pointer
-    ASCIIFontAtlas atlas;
+    ASCIIAtlas atlas;
     raqm_t* rq;
 };
 

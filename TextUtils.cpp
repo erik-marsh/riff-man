@@ -93,44 +93,8 @@ int TGAImage::OffsetOf(int x, int y) const {
     return (4 * y * width) + (4 * x) + 18;
 }
 
-
-////////////////////////////////////////////////////////////////////////////////
-// DynamicText
-////////////////////////////////////////////////////////////////////////////////
-DynamicText::DynamicText()
-    : m_width(0), m_height(0) {
-    std::memset(&m_texture, 0, sizeof(m_texture));
-}
-
-DynamicText::DynamicText(const DynamicText& other)
-    : m_width(other.m_width), m_height(other.m_height) {
-    Image copy = LoadImageFromTexture(other.m_texture);
-    m_texture = LoadTextureFromImage(copy);
-    UnloadImage(copy);
-}
-
-DynamicText::DynamicText(DynamicText&& other)
-    : m_width(other.m_width), m_height(other.m_height),
-      m_texture(other.m_texture) { }
-
-DynamicText& DynamicText::operator=(const DynamicText& other) {
-    m_width = other.m_width;
-    m_height = other.m_height;
-    Image copy = LoadImageFromTexture(other.m_texture);
-    m_texture = LoadTextureFromImage(copy);
-    UnloadImage(copy);
-    return *this;
-}
-
-DynamicText& DynamicText::operator=(DynamicText&& other) {
-    m_width = other.m_width;
-    m_height = other.m_height;
-    m_texture = other.m_texture;
-    return *this;
-}
-
-void DynamicText::LoadText(std::string_view str, TextRenderContext& textCtx,
-                           const char* langHint) {
+Texture RenderText(std::string_view str, const TextRenderContext& textCtx,
+                   const char* langHint) {
     // TODO: we could add some introspection here to detect text language
     //       i think harfbuzz can do that directly
     if (!langHint)
@@ -154,6 +118,8 @@ void DynamicText::LoadText(std::string_view str, TextRenderContext& textCtx,
     FT_Pos yLo = std::numeric_limits<FT_Pos>::max();
     FT_Pos yHi = std::numeric_limits<FT_Pos>::min();
     FT_Pos yBaseline = std::numeric_limits<FT_Pos>::max();
+    int width = 0;
+    int height = 0;
     for (size_t i = 0; i < glyphCount; i++) {
         FT_Load_Glyph(textCtx.face, glyphs[i].index, FT_LOAD_DEFAULT);
         const auto& metrics = textCtx.face->glyph->metrics;
@@ -163,25 +129,24 @@ void DynamicText::LoadText(std::string_view str, TextRenderContext& textCtx,
         yLo = std::min(yLo, (metrics.horiBearingY - metrics.height) >> 6);
         yBaseline = std::min(yBaseline, (metrics.horiBearingY - metrics.height) >> 6);
         
-        m_width += glyphs[i].x_advance >> 6;
+        width += glyphs[i].x_advance >> 6;
     }
 
-    m_height = yHi - yLo;
+    height = yHi - yLo;
 
     // on my machine, textures that do not have an even number width render
     // a bit skewed. seems to be a texture coordinate rounding issue.
     // this could be a general OpenGL thing on many machines, but idk yet
-    if (m_width % 2 != 0)
-        m_width++;
+    if (width % 2 != 0)
+        width++;
 
-    TGAImage bmpOut(m_width, m_height);
+    TGAImage bmpOut(width, height);
 
     // TODO: add debug info back in
 
     int penX = 0;
     int penY = std::abs(yBaseline);
 
-    using uint = unsigned int;
     for (size_t i = 0; i < glyphCount; i++) {
         FT_Load_Glyph(textCtx.face, glyphs[i].index, FT_LOAD_DEFAULT);
         FT_Render_Glyph(textCtx.face->glyph, FT_RENDER_MODE_NORMAL);
@@ -191,15 +156,15 @@ void DynamicText::LoadText(std::string_view str, TextRenderContext& textCtx,
         const int yOrigin = penY + glyph->bitmap_top - glyph->bitmap.rows;
         const FT_Bitmap& bmpIn = glyph->bitmap;
         
-        for (uint bx = 0; bx < bmpIn.width; bx++) {
-            for (uint by = 0; by < bmpIn.rows; by++) {
+        for (unsigned int bx = 0; bx < bmpIn.width; bx++) {
+            for (unsigned int by = 0; by < bmpIn.rows; by++) {
                 const int x = xOrigin + bx;
-                if (x > m_width || x < 0) continue;
+                if (x > width || x < 0) continue;
 
                 // the TGA image is a "y-down" system
                 // whereas the FreeType bitmap is a "y-up" system
                 const int y = yOrigin + (bmpIn.rows - by - 1);
-                if (y > m_height || y < 0) continue;
+                if (y > height || y < 0) continue;
 
                 const int pxOut = bmpOut.OffsetOf(x, y);
                 const int pxIn = bmpIn.width * by + bx;
@@ -216,32 +181,14 @@ void DynamicText::LoadText(std::string_view str, TextRenderContext& textCtx,
     }
 
     Image image = LoadImageFromMemory(".tga", bmpOut.buffer.data(), bmpOut.buffer.size());
-    m_texture = LoadTextureFromImage(image);
+    Texture texture = LoadTextureFromImage(image);
     UnloadImage(image);
+    return texture;
 }
-
-// TODO: is it kosher for this to occur after CloseWindow() is called?
-DynamicText::~DynamicText() {
-    if (IsTextureValid(m_texture))
-        UnloadTexture(m_texture);
-}
-
-int DynamicText::Width() const { return m_width; }
-
-int DynamicText::Height() const { return m_height; }
-
-Clay_Dimensions DynamicText::ClayDimensions() const {
-    return {
-        .width = static_cast<float>(m_width),
-        .height = static_cast<float>(m_height)
-    };
-}
-
-Texture& DynamicText::RaylibTexture() { return m_texture; }
 
 
 ////////////////////////////////////////////////////////////////////////////////
-// ASCIIFontAtlas
+// ASCIIAtlas
 ////////////////////////////////////////////////////////////////////////////////
 
 // Some helpers for this class that don't need to be exposed anywhere
@@ -255,13 +202,13 @@ constexpr char ASCIIToGlyph(char ch) {
     return ch - charMin;
 }
 
-ASCIIFontAtlas::ASCIIFontAtlas() 
+ASCIIAtlas::ASCIIAtlas() 
     : m_maxAscent(-1),
       m_maxHeight(-1) {
     std::memset(&m_texture, 0, sizeof(m_texture));
 }
 
-ASCIIFontAtlas::ASCIIFontAtlas(const ASCIIFontAtlas& other)
+ASCIIAtlas::ASCIIAtlas(const ASCIIAtlas& other)
     : m_maxAscent(other.m_maxAscent),
       m_maxHeight(other.m_maxHeight),
       m_glyphLocs(other.m_glyphLocs) {
@@ -270,13 +217,13 @@ ASCIIFontAtlas::ASCIIFontAtlas(const ASCIIFontAtlas& other)
     UnloadImage(copy);
 }
 
-ASCIIFontAtlas::ASCIIFontAtlas(ASCIIFontAtlas&& other)
+ASCIIAtlas::ASCIIAtlas(ASCIIAtlas&& other)
     : m_texture(other.m_texture),
       m_maxAscent(other.m_maxAscent),
       m_maxHeight(other.m_maxHeight),
       m_glyphLocs(std::move(other.m_glyphLocs)) {}
 
-ASCIIFontAtlas& ASCIIFontAtlas::operator=(const ASCIIFontAtlas& other) {
+ASCIIAtlas& ASCIIAtlas::operator=(const ASCIIAtlas& other) {
     Image copy = LoadImageFromTexture(other.m_texture);
     m_texture = LoadTextureFromImage(copy);
     m_maxAscent = other.m_maxAscent;
@@ -286,7 +233,7 @@ ASCIIFontAtlas& ASCIIFontAtlas::operator=(const ASCIIFontAtlas& other) {
     return *this;
 }
 
-ASCIIFontAtlas& ASCIIFontAtlas::operator=(ASCIIFontAtlas&& other) {
+ASCIIAtlas& ASCIIAtlas::operator=(ASCIIAtlas&& other) {
     m_texture = other.m_texture;
     m_maxAscent = other.m_maxAscent;
     m_maxHeight = other.m_maxHeight;
@@ -294,13 +241,13 @@ ASCIIFontAtlas& ASCIIFontAtlas::operator=(ASCIIFontAtlas&& other) {
     return *this;
 }
 
-// TODO: see DynamicText::~DynamicText()
-ASCIIFontAtlas::~ASCIIFontAtlas() {
+// TODO: is it kosher for this to occur after CloseWindow() is called?
+ASCIIAtlas::~ASCIIAtlas() {
     if (IsTextureValid(m_texture))
         UnloadTexture(m_texture);
 }
 
-bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
+bool ASCIIAtlas::LoadGlyphs(FT_Face face) {
     // create ASCII-ish font atlas as a default rendering fallback
     // characters of interest are 0x20-0x7E
     // question mark will be the "unknown character marker" (0x3F)
@@ -334,7 +281,13 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
 
     // 2. draw freetype bitmaps and mark their positions
     m_glyphLocs.resize(charMax - charMin + 1);
+
+    // i hate warnings sometimes...
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wshadow"
     using uint = unsigned int;
+#pragma GCC diagnostic pop
+
     for (char i = charMin ; i <= charMax; i++) {
         const char ch = ASCIIToGlyph(i);
         const uint row = ch / numCols;
@@ -446,13 +399,13 @@ bool ASCIIFontAtlas::LoadGlyphs(FT_Face face) {
     return true;
 }
 
-Texture& ASCIIFontAtlas::RaylibTexture() { return m_texture; }
+Texture& ASCIIAtlas::RaylibTexture() { return m_texture; }
 
-int ASCIIFontAtlas::GetMaxAscent() const { return m_maxAscent; }
+int ASCIIAtlas::GetMaxAscent() const { return m_maxAscent; }
 
-int ASCIIFontAtlas::GetMaxHeight() const { return m_maxHeight; }
+int ASCIIAtlas::GetMaxHeight() const { return m_maxHeight; }
 
-const AtlasGlyph& ASCIIFontAtlas::GetGlyphLocation(char ch) const {
+const ASCIIAtlas::GlyphInfo& ASCIIAtlas::GetGlyphLocation(char ch) const {
     const char offset = ASCIIToGlyph(ch);
     return m_glyphLocs[offset];
 }

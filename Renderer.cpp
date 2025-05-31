@@ -65,7 +65,7 @@ void DrawTextASCII(TextRenderContext& textCtx, const char* text, int len, int x,
         return;
 
     for (size_t i = 0; i < count; i++) {
-        const AtlasGlyph& loc = textCtx.atlas.GetGlyphLocation(text[i]);
+        const ASCIIAtlas::GlyphInfo& loc = textCtx.atlas.GetGlyphLocation(text[i]);
         const int glyphAscent = loc.height - loc.penOffsetY;
 
 #pragma GCC diagnostic push

@@ -15,6 +15,8 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Renderer.hpp"
@@ -31,18 +33,16 @@ enum class AudioFormat {
 };
 
 struct SongEntry {
-    // data for program logic
     long id;
     std::string filename;
     AudioFormat fileFormat;
-    
-    // file metadata
-    std::string name;
-    std::string byArtist;
-    // std::string inAlbum;
-    // float duration;  // in seconds
+    std::string_view uiName;
+    std::string_view uiByArtist;
+};
 
-    DynamicText text;
+struct CollectionEntry {
+    long id;
+    std::string_view uiName;
 };
 
 struct PlaybackState {
@@ -57,6 +57,62 @@ struct StringBuffer {
     size_t capacity;
     size_t size;
 };
+
+// Solves a barely-existent problem
+// I just want my strings to be owned by a singleton (effectively)
+// I honestly don't know why, I just don't want my song/album metadata to own any strings right now
+class UIStringPool {
+ public:
+    // Register a string with the pool and return a view to it.
+    // If the string has already been registered, returns a view to the existing string.
+    std::string_view Register(const std::string& str, TextRenderContext& textCtx) {
+        auto [it, _] = m_store.emplace(str);
+        std::string_view view(*it);
+        m_textures.insert({view, RenderText(str, textCtx)});
+        return view;
+    }
+
+    std::string_view Register(const char* str, TextRenderContext& textCtx) {
+        return Register(std::string(str), textCtx);
+    }
+
+    std::string_view Register(const unsigned char* str, TextRenderContext& textCtx) {
+        return Register(reinterpret_cast<const char*>(str), textCtx);
+    }
+
+    std::string_view Register(std::string_view str, TextRenderContext& textCtx) {
+        return Register(std::string(str), textCtx);
+    }
+
+    void Show() const {
+        std::printf("Store:\n");
+        for (auto str : m_store)
+            std::printf("    %s\n", str.c_str());
+
+        const int space = 41;
+        std::printf("Textures:\n");
+        for (auto str : m_store) {
+            std::string_view view(str);
+            auto& tex = m_textures.at(view);
+
+            int written = std::printf("    %s", str.data());
+            int remaining = space - written;
+            for (int i = 0; i < remaining; i++)
+                std::fputc(' ', stdout);
+            std::printf(" => [#%d %dx%d]\n", tex.id, tex.width, tex.height);
+        }
+    }
+
+    const Texture& GetTexture(std::string_view str) const {
+        return m_textures.at(str);
+    }
+
+ private:
+    // fun fact: std::hash<std::string> == std::hash<std::string_view>
+    std::unordered_set<std::string> m_store;
+    std::unordered_map<std::string_view, Texture> m_textures;
+};
+
 
 // designed to hold a maximum of hhh:mm:ss (9 chars)
 // memory is alloc'd in main()
@@ -95,7 +151,8 @@ struct LayoutInfo {
     long hoveredSongId;
 };
 
-LayoutInfo MakeLayout(const PlaybackState& state, std::vector<SongEntry>& songs) {
+LayoutInfo MakeLayout(const PlaybackState& state, const std::vector<SongEntry>& songs,
+                      const UIStringPool& pool) {
     // TODO: check if things need to be static constexpr
     constexpr Clay_Color white     { 255, 255, 255, 255 };
     constexpr Clay_Color black     { 0, 0, 0, 255 };
@@ -141,8 +198,9 @@ LayoutInfo MakeLayout(const PlaybackState& state, std::vector<SongEntry>& songs)
 
     LayoutInfo ret;
 
-    static auto MakeSongEntry = [&ret](int songIndex, SongEntry& song) {
-        const auto dim = song.text.ClayDimensions();
+    static auto MakeSongEntry = [&ret, &pool](int songIndex, const SongEntry& song) {
+        const Texture& tex = pool.GetTexture(song.uiName);
+        const Clay_Dimensions dim{ .width = tex.width, .height = tex.height };
         const Clay_ElementDeclaration config{
             .id = CLAY_IDI("Song", songIndex),
             .layout = {
@@ -151,14 +209,14 @@ LayoutInfo MakeLayout(const PlaybackState& state, std::vector<SongEntry>& songs)
                 .childAlignment = centered },
             .backgroundColor = lightgray,
             .cornerRadius = rounding,
-            .border = { .color = {255, 0, 0, 255}, .width = {1,1,1,1,1}  },
+            // .border = { .color = {255, 0, 0, 255}, .width = {1,1,1,1,1}  },
         };
         const Clay_ElementDeclaration imageConfig{
             .layout = {
                 .sizing = { .width = CLAY_SIZING_FIXED(dim.width),
                             .height = CLAY_SIZING_FIXED(dim.height) } },
             .image = {
-                .imageData = &song.text.RaylibTexture(),
+                .imageData = &const_cast<Texture&>(tex),
                 .sourceDimensions = dim }
         };
         CLAY(config) {
@@ -196,6 +254,11 @@ LayoutInfo MakeLayout(const PlaybackState& state, std::vector<SongEntry>& songs)
               MakeSongEntry(i, song);
         }
         CLAY(controlLayout) {
+            CLAY({ .layout = { .sizing = growAll, .childAlignment = centered, .layoutDirection = CLAY_TOP_TO_BOTTOM }}) {
+                CLAY_TEXT(CLAY_STRING("title"), CLAY_TEXT_CONFIG({}));
+                CLAY_TEXT(CLAY_STRING("artist"), CLAY_TEXT_CONFIG({}));
+                CLAY_TEXT(CLAY_STRING("album"), CLAY_TEXT_CONFIG({}));
+            }
             CLAY(timeLayout) {
                 TimeFormat(state.currTime, playbackTime);
                 CLAY_TEXT(casts::clay::String(playbackTime), CLAY_TEXT_CONFIG({}));
@@ -276,6 +339,18 @@ int main() {
         return 1;
     }
 
+    err = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS collections(name TEXT);", nullptr, nullptr, nullptr);
+    if (err != SQLITE_OK) {
+        sqlite3_close(db);
+        return 1;
+    }
+
+    err = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS collections_contents(collectionId INTEGER, songId INTEGER);", nullptr, nullptr, nullptr);
+    if (err != SQLITE_OK) {
+        sqlite3_close(db);
+        return 1;
+    }
+
     // Init FreeType
     FT_Library ft;
     err = FT_Init_FreeType(&ft);
@@ -332,6 +407,7 @@ int main() {
         return std::string(reinterpret_cast<const char*>(str));
     };
 
+    UIStringPool pool;
     std::vector<SongEntry> songs(count);
     for (int i = 0; i < count; i++) {
         err = sqlite3_step(stmt);
@@ -344,9 +420,8 @@ int main() {
         songs[i].id = i;
         songs[i].filename = ToString(sqlite3_column_text(stmt, 1));
         songs[i].fileFormat = AudioFormat::MP3;
-        songs[i].name = ToString(sqlite3_column_text(stmt, 3));
-        songs[i].byArtist = ToString(sqlite3_column_text(stmt, 4));
-        songs[i].text.LoadText(songs[i].name, textCtx);
+        songs[i].uiName = pool.Register(sqlite3_column_text(stmt, 3), textCtx);
+        songs[i].uiByArtist = pool.Register(sqlite3_column_text(stmt, 4), textCtx);
     }
     sqlite3_finalize(stmt);
 
@@ -395,7 +470,7 @@ int main() {
         // MakeLayout will implicitly update input state.
         // We consider this to be part of next frame's phase 1.
         Clay_SetLayoutDimensions(GetScreenDimensions());
-        auto [renderCommands, hovered] = MakeLayout(state, songs);
+        auto [renderCommands, hovered] = MakeLayout(state, songs, pool);
         hoveredSongId = hovered;
 
         // Phase 4: render
