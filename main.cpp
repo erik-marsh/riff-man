@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -22,6 +23,22 @@
 #include "Renderer.hpp"
 #include "TextUtils.hpp"
 #include "Casts.hpp"
+#include "Defer.hpp"
+
+// making our initial memory allocation strategy as dumb as humanly possible
+// since i don't know what i want the lifetime of SongEntry entites to be
+// this is just a stack-based arena that assumes **nothing is ever de-allocated**
+template <typename T>
+struct Arena {
+    T arr[1000];
+    int top = 0;
+
+    int Allocate() {
+        top++;
+        assert((top < 1000) && "Overallocated!");
+        return top - 1;
+    }
+};
 
 // see https://schema.org/MusicRecording for some info
 // also look up the multimedia section of "awesome-falsehood"
@@ -30,8 +47,10 @@ enum class AudioFormat {
     OPUS
 };
 
+using EntityId = long int;
+
 struct SongEntry {
-    long id;
+    EntityId id;
     std::string filename;
     AudioFormat fileFormat;
     std::string_view uiName;
@@ -39,7 +58,7 @@ struct SongEntry {
 };
 
 struct CollectionEntry {
-    long id;
+    EntityId id;
     std::string_view uiName;
 };
 
@@ -120,7 +139,7 @@ void TimeFormat(float seconds, StringBuffer& dest) {
     if (hh == 0)
         res = std::format_to_n(dest.buffer, dest.capacity - 1, "{}:{:02}", mm, ss);
     else
-        res = std::format_to_n(dest.buffer, dest.capacity - 1, "{}:{}:{:02}", hh, mm, ss);
+        res = std::format_to_n(dest.buffer, dest.capacity - 1, "{}:{:02}:{:02}", hh, mm, ss);
     *res.out = '\0';
     dest.size = res.size;
 }
@@ -132,8 +151,9 @@ struct LayoutInfo {
 };
 
 LayoutInfo MakeLayout(const PlaybackState& state,
-                      const std::vector<CollectionEntry>& collections,
-                      const std::vector<SongEntry>& songs,
+                      Arena<SongEntry>& songArena,
+                      Arena<CollectionEntry>& collectionArena,
+                      const std::vector<int>& songs,
                       const UIStringPool& pool) {
     // TODO: check if things need to be static constexpr
     constexpr Clay_Color white     { 255, 255, 255, 255 };
@@ -267,12 +287,12 @@ LayoutInfo MakeLayout(const PlaybackState& state,
     CLAY(root) {
         CLAY(navigation) {
             CLAY(collectionView) {
-                for (auto [i, c] : std::views::enumerate(collections))
-                    MakeCollectionEntry(i, c);
+                for (int i = 0; i < collectionArena.top; i++)
+                    MakeCollectionEntry(i, collectionArena.arr[i]);
             }
             CLAY(songView) {
-                for (auto [i, s] : std::views::enumerate(songs))
-                  MakeSongEntry(i, s);
+                for (auto [i, songIndex] : std::views::enumerate(songs))
+                    MakeSongEntry(i, songArena.arr[songIndex]);
             }
         }
         CLAY(nowPlaying) {
@@ -299,10 +319,6 @@ LayoutInfo MakeLayout(const PlaybackState& state,
     return ret;
 }
 
-void ClayError(Clay_ErrorData errorData) {
-    printf("%s\n", errorData.errorText.chars);
-}
-
 void LoadSong(PlaybackState& state, const SongEntry& song) {
     if (IsMusicValid(state.audioBuffer)) {
         StopMusicStream(state.audioBuffer);
@@ -324,28 +340,23 @@ Clay_Dimensions GetScreenDimensions() {
     };
 }
 
-void LogSQLiteCallback(void*, int errCode, const char* msg) {
-    std::string log = std::format("{}: {}\n", sqlite3_errstr(errCode), msg);
-    printf(log.c_str());
+void ClayError(Clay_ErrorData errorData) {
+    std::printf("[CLAY ERROR] %s\n", errorData.errorText.chars);
 }
 
-int DeferredReleaser_counter = 0;
-
-template <typename Lambda>
-class DeferredReleaser {
- public:
-    DeferredReleaser(Lambda lambda) : m_lambda(lambda) { DeferredReleaser_counter++; }
-    ~DeferredReleaser() { m_lambda(); DeferredReleaser_counter--; std::printf("Releaser %d executed.\n", DeferredReleaser_counter); }
- private:
-    Lambda m_lambda;
-};
-
-template <typename Lambda>
-DeferredReleaser<Lambda> Defer(Lambda lambda) {
-    return DeferredReleaser(lambda);
+void LogSQLiteCallback(void*, int errCode, const char* msg) {
+    std::printf("[SQLITE] %s: %s\n", sqlite3_errstr(errCode), msg);
 }
 
 #define EXIT_ON_FT_ERR(err) if (err) { FTPrintError(err); return 1; }
+
+Arena<SongEntry> songArena;
+Arena<CollectionEntry> collectionArena;
+
+// maps entity ids to arena indices
+std::unordered_map<EntityId, int> songsById;
+std::unordered_map<EntityId, std::vector<int>> songsByCollection;
+std::unordered_map<EntityId, int> collectionsById;
 
 int main() {
     // Init Raylib
@@ -354,7 +365,6 @@ int main() {
     SetTargetFPS(60);
     InitAudioDevice();
     const auto raylibReleaser = Defer([](){
-        std::printf("Deferred release for raylib...\n");
         CloseAudioDevice();
         CloseWindow();
     });
@@ -376,10 +386,7 @@ int main() {
     int err = sqlite3_open_v2("riff-man.db", &db, dbFlags, nullptr);
     if (err != SQLITE_OK) return 1;
 
-    const auto sqliteReleaser([&db](){
-        std::printf("Deferred release for sqlite...\n");
-        sqlite3_close(db);
-    });
+    const auto sqliteReleaser([&db](){ sqlite3_close(db); });
 
     err = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS songs(filename TEXT, fileFormat TEXT, name TEXT, byArtist TEXT);", nullptr, nullptr, nullptr);
     if (err != SQLITE_OK) return 1;
@@ -395,20 +402,14 @@ int main() {
     err = FT_Init_FreeType(&ft);
     EXIT_ON_FT_ERR(err);
 
-    const auto freetypeReleaser = Defer([&ft](){
-        std::printf("Deferred release for FreeType...\n");
-        FT_Done_FreeType(ft);
-    });
+    const auto freetypeReleaser = Defer([&ft](){ FT_Done_FreeType(ft); });
 
     // Init text rendering utilities
     TextRenderContext textCtx;
     err = FT_New_Face(ft, "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0, &textCtx.face);
     EXIT_ON_FT_ERR(err);
 
-    const auto faceReleaser = Defer([&textCtx](){
-        std::printf("Deferred release for FreeType face...\n");
-        FT_Done_Face(textCtx.face);
-    });
+    const auto faceReleaser = Defer([&textCtx](){ FT_Done_Face(textCtx.face); });
 
     // TODO: this should not be hardcoded
     err = FT_Set_Pixel_Sizes(textCtx.face, 20, 20);
@@ -416,10 +417,9 @@ int main() {
 
     textCtx.atlas.LoadGlyphs(textCtx.face);
     textCtx.rq = raqm_create();
-    const auto raqmReleaser = Defer([&textCtx](){
-        std::printf("Deferred release for raqm...\n");
-        raqm_destroy(textCtx.rq);
-    });
+    const auto raqmReleaser = Defer([&textCtx](){ raqm_destroy(textCtx.rq); });
+
+    Clay_SetMeasureTextFunction(MeasureText, &textCtx);
 
     playbackTime.buffer = new char[10];
     playbackTime.capacity = 10;
@@ -430,7 +430,6 @@ int main() {
     trackLength.size = 0;
     
     const auto stringBufferReleaser = Defer([](){
-        std::printf("Deferred releaser for string buffers...\n");
         delete[] playbackTime.buffer;
         delete[] trackLength.buffer;
     });
@@ -446,66 +445,43 @@ int main() {
     UIStringPool pool;
 
     sqlite3_stmt* stmt;
-    err = PrepareQuery(db, &stmt, "SELECT count(*) FROM collections;");
-    if (err != SQLITE_OK)
-        return 1;
-
-    err = sqlite3_step(stmt);
-    if (err != SQLITE_ROW)
-        return 1;
-
-    const long collCount = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-    
-    // TODO: needs to be a map: id -> entry
-    std::vector<CollectionEntry> collections(collCount);
-    std::unordered_map<long int, size_t> collectionsById;
     err = PrepareQuery(db, &stmt, "SELECT rowid, * FROM collections;");
-    for (int i = 0; i < collCount; i++) {
-        err = sqlite3_step(stmt);
-        if (err != SQLITE_ROW) return 1;
+    if (err != SQLITE_OK) return 1;
 
-        long int id = sqlite3_column_int64(stmt, 0);
-        collections[i].id = id;
-        collections[i].uiName = pool.Register(sqlite3_column_text(stmt, 1), textCtx);
+    while ((err = sqlite3_step(stmt)) == SQLITE_ROW) {
+        int i = collectionArena.Allocate();
+        EntityId id = sqlite3_column_int64(stmt, 0);
+
+        collectionArena.arr[i].id = id;
+        collectionArena.arr[i].uiName = pool.Register(sqlite3_column_text(stmt, 1), textCtx);
         collectionsById.emplace(id, i);
-
     }
+
     sqlite3_finalize(stmt);
 
-    std::unordered_map<long int, std::vector<SongEntry>> songsByCollection;
-    std::unordered_map<long int, std::pair<long int, size_t>> songsById;
-    for (const auto& [collId, collIndex] : collections) {
-        const std::string sizeQuery = std::format("SELECT count(*) FROM collections_contents INNER JOIN songs ON collections_contents.songId = songs.rowid WHERE collections_contents.collectionId = {};", collId);
+    for (const auto& [collId, collIndex] : collectionsById) {
+        // const std::string sizeQuery = std::format("SELECT count(*) FROM collections_contents INNER JOIN songs ON collections_contents.songId = songs.rowid WHERE collections_contents.collectionId = {};", collId);
         const std::string contentQuery = std::format("SELECT songs.rowid, songs.* FROM collections_contents INNER JOIN songs ON collections_contents.songId = songs.rowid WHERE collections_contents.collectionId = {};", collId);
-
-        err = PrepareQuery(db, &stmt, sizeQuery);
-        if (err != SQLITE_OK) return 1;
-
-        err = sqlite3_step(stmt);
-        if (err != SQLITE_ROW) return 1;
-
-        const long songsCount = sqlite3_column_int64(stmt, 0);
-        sqlite3_finalize(stmt);
-
-        songsByCollection.emplace(collId, std::vector<SongEntry>(songsCount));
 
         err = PrepareQuery(db, &stmt, contentQuery);
         if (err != SQLITE_OK) return 1;
 
-        // idk if you need to, but do in fact remember anyway that SQLite tables are 1-indexed
-        for (int j = 0; j < songsCount; j++) {
-            if (sqlite3_step(stmt) != SQLITE_ROW) return 1;
+        songsByCollection.emplace(collId, std::vector<int>());
+        while ((err = sqlite3_step(stmt)) == SQLITE_ROW) {
+            int i = songArena.Allocate();
+            // note that SQLite tables are 1-indexed
+            EntityId id = sqlite3_column_int64(stmt, 0);
 
-            long int songId = sqlite3_column_int64(stmt, 0);
-            songsByCollection[collId][j].id = songId;
-            songsByCollection[collId][j].filename = ToString(sqlite3_column_text(stmt, 1));
-            songsByCollection[collId][j].fileFormat = AudioFormat::MP3;  // TODO: bad
-            songsByCollection[collId][j].uiName = pool.Register(sqlite3_column_text(stmt, 3), textCtx);
-            songsByCollection[collId][j].uiByArtist = pool.Register(sqlite3_column_text(stmt, 4), textCtx);
+            songArena.arr[i].id = id;
+            songArena.arr[i].filename = ToString(sqlite3_column_text(stmt, 1));
+            songArena.arr[i].fileFormat = AudioFormat::MP3;  // TODO: bad
+            songArena.arr[i].uiName = pool.Register(sqlite3_column_text(stmt, 3), textCtx);
+            songArena.arr[i].uiByArtist = pool.Register(sqlite3_column_text(stmt, 4), textCtx);
 
-            songsById.emplace(songId, std::make_pair(collId, j));
+            songsById.emplace(id, i);
+            songsByCollection[collId].push_back(i);
         }
+
         sqlite3_finalize(stmt);
     }
     
@@ -520,11 +496,10 @@ int main() {
     layoutInfo.hoveredSongId = -1;
     layoutInfo.hoveredCollectionId = -1;
 
-    Clay_SetMeasureTextFunction(MeasureText, &textCtx);
-
-    const std::vector<SongEntry> emptySongList;
+    const std::vector<int> emptySongList;
     long int selectedCollection = -1;
     bool clayDebugEnabled = false;
+
     while (!WindowShouldClose()) {
         // Phase 1: input state updates
         if (IsKeyPressed(KEY_D)) {
@@ -546,12 +521,13 @@ int main() {
         Clay_UpdateScrollContainers(false, mouseWheelDelta, GetFrameTime());
         
         // Phase 2: application state updates
-        if (layoutInfo.hoveredCollectionId > -1 && IsMouseButtonReleased(0))
+        if (layoutInfo.hoveredCollectionId > -1 && IsMouseButtonReleased(0)) {
             selectedCollection = layoutInfo.hoveredCollectionId;
+        }
 
         if (layoutInfo.hoveredSongId > -1 && IsMouseButtonReleased(0)) {
-            const auto [collId, index] = songsById[layoutInfo.hoveredSongId];
-            LoadSong(state, songsByCollection[collId][index]);
+            const int i = songsById[layoutInfo.hoveredSongId];
+            LoadSong(state, songArena.arr[i]);
         }
 
         if (IsMusicValid(state.audioBuffer)) {
@@ -563,9 +539,8 @@ int main() {
         // MakeLayout will implicitly update input state.
         // We consider this to be part of next frame's phase 1.
         Clay_SetLayoutDimensions(GetScreenDimensions());
-        const std::vector<SongEntry>& songList =
-            selectedCollection != -1 ? songsByCollection[selectedCollection] : emptySongList;
-        layoutInfo = MakeLayout(state, collections, songList, pool);
+        const std::vector<int>& songList = selectedCollection != -1 ? songsByCollection[selectedCollection] : emptySongList;
+        layoutInfo = MakeLayout(state, songArena, collectionArena, songList, pool);
 
         // Phase 4: render
         BeginDrawing();
