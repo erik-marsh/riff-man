@@ -5,319 +5,21 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
-#include <algorithm>
-#include <array>
-#include <cassert>
 #include <cstdio>
 #include <cmath>
-#include <cstring>
-#include <format>
-#include <numeric>
-#include <ranges>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "Allocators.hpp"
+#include "Casts.hpp"
+#include "Data.hpp"
+#include "Defer.hpp"
+#include "Layout.hpp"
 #include "Renderer.hpp"
 #include "TextUtils.hpp"
-#include "Casts.hpp"
-#include "Defer.hpp"
-
-// making our initial memory allocation strategy as dumb as humanly possible
-// since i don't know what i want the lifetime of SongEntry entites to be
-// this is just a stack-based arena that assumes **nothing is ever de-allocated**
-template <typename T>
-struct Arena {
-    T arr[1000];
-    int top = 0;
-
-    int Allocate() {
-        top++;
-        assert((top < 1000) && "Overallocated!");
-        return top - 1;
-    }
-};
-
-// see https://schema.org/MusicRecording for some info
-// also look up the multimedia section of "awesome-falsehood"
-enum class AudioFormat {
-    MP3,
-    OPUS
-};
-
-using EntityId = long int;
-
-struct SongEntry {
-    EntityId id;
-    std::string filename;
-    AudioFormat fileFormat;
-    std::string_view uiName;
-    std::string_view uiByArtist;
-};
-
-struct CollectionEntry {
-    EntityId id;
-    std::string_view uiName;
-};
-
-struct PlaybackState {
-    Music audioBuffer;
-    const SongEntry* metadata;
-    float duration;
-    float currTime;
-};
-
-struct StringBuffer {
-    char* buffer;
-    size_t capacity;
-    size_t size;
-};
-
-// Solves a barely-existent problem
-// I just want my strings to be owned by a singleton (effectively)
-// I honestly don't know why, I just don't want my song/album metadata to own any strings right now
-class UIStringPool {
- public:
-    // Register a string with the pool and return a view to it.
-    // If the string has already been registered, returns a view to the existing string.
-    std::string_view Register(const std::string& str, TextRenderContext& textCtx) {
-        auto [it, _] = m_store.emplace(str);
-        std::string_view view(*it);
-        m_textures.insert({view, RenderText(str, textCtx)});
-        return view;
-    }
-
-    std::string_view Register(const char* str, TextRenderContext& textCtx) {
-        return Register(std::string(str), textCtx);
-    }
-
-    std::string_view Register(const unsigned char* str, TextRenderContext& textCtx) {
-        return Register(reinterpret_cast<const char*>(str), textCtx);
-    }
-
-    std::string_view Register(std::string_view str, TextRenderContext& textCtx) {
-        return Register(std::string(str), textCtx);
-    }
-
-    const Texture& GetTexture(std::string_view str) const {
-        return m_textures.at(str);
-    }
-
- private:
-    // fun fact: std::hash<std::string> == std::hash<std::string_view>
-    std::unordered_set<std::string> m_store;
-    std::unordered_map<std::string_view, Texture> m_textures;
-};
-
-
-// designed to hold a maximum of hhh:mm:ss (9 chars)
-// memory is alloc'd in main()
-StringBuffer playbackTime;
-StringBuffer trackLength;
-
-// TODO: does not cleanly go into Casts.hpp because of my StringBuffer struct
-namespace casts::clay {
-constexpr Clay_String String(const StringBuffer& str) {
-    return {
-        .length = static_cast<int32_t>(str.size),
-        .chars = str.buffer };
-}
-}
-
-// If we declare our layout in a function,
-// the variables declared inside are not visible to the renderer.
-// I just decided to use global buffers for any necessary string conversions.
-void TimeFormat(float seconds, StringBuffer& dest) {
-    const int asInt = static_cast<int>(seconds);
-    const int ss = asInt % 60;
-    const int mm = asInt / 60;
-    const int hh = mm / 60;
-
-    std::format_to_n_result<char*> res;
-    if (hh == 0)
-        res = std::format_to_n(dest.buffer, dest.capacity - 1, "{}:{:02}", mm, ss);
-    else
-        res = std::format_to_n(dest.buffer, dest.capacity - 1, "{}:{:02}:{:02}", hh, mm, ss);
-    *res.out = '\0';
-    dest.size = res.size;
-}
-
-struct LayoutInfo {
-    Clay_RenderCommandArray renderCommands;
-    long hoveredSongId;
-    long hoveredCollectionId;
-};
-
-LayoutInfo MakeLayout(const PlaybackState& state,
-                      Arena<SongEntry>& songArena,
-                      Arena<CollectionEntry>& collectionArena,
-                      const std::vector<int>& songs,
-                      const UIStringPool& pool) {
-    // TODO: check if things need to be static constexpr
-    constexpr Clay_Color white     { 255, 255, 255, 255 };
-    constexpr Clay_Color black     { 0, 0, 0, 255 };
-    constexpr Clay_Color lightgray { 100, 100, 100, 255 };
-    constexpr Clay_Color darkgray  { 50, 50, 50, 255 };
-    constexpr Clay_Color darkergray{ 35, 35, 35, 255 };
-
-    constexpr Clay_ChildAlignment centered{ .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER };
-    constexpr Clay_CornerRadius rounding{ 10, 10, 10, 10 };
-    constexpr Clay_Sizing growAll{ .width = CLAY_SIZING_GROW(), .height = CLAY_SIZING_GROW() };
-
-    constexpr int panelSpacing = 2;
-
-    constexpr Clay_ElementDeclaration root{
-        .layout = {
-            .sizing = growAll,
-            .childGap = panelSpacing,
-            .layoutDirection = CLAY_TOP_TO_BOTTOM }
-    };
-    constexpr Clay_ElementDeclaration navigation{
-        .layout = {
-            .sizing = { .width = CLAY_SIZING_GROW(), .height = CLAY_SIZING_PERCENT(0.85) },
-            .childGap = panelSpacing,
-            .layoutDirection = CLAY_LEFT_TO_RIGHT },
-        .backgroundColor = black
-    };
-    constexpr Clay_ElementDeclaration collectionView {
-        .layout = {
-            .sizing = { .width = CLAY_SIZING_PERCENT(0.20), .height = CLAY_SIZING_GROW() },
-            .padding = CLAY_PADDING_ALL(16),
-            .childGap = 16,
-            .layoutDirection = CLAY_TOP_TO_BOTTOM },
-        .backgroundColor = darkgray,
-        .scroll = { .vertical = true }
-    };
-    constexpr Clay_ElementDeclaration songView {
-        .layout = {
-            .sizing = growAll,
-            .padding = CLAY_PADDING_ALL(16),
-            .childGap = 16,
-            .layoutDirection = CLAY_TOP_TO_BOTTOM },
-        .backgroundColor = darkgray,
-        .scroll = { .vertical = true }
-    };
-    constexpr Clay_ElementDeclaration nowPlaying{
-        .layout = {
-            .sizing = growAll,
-            .padding = CLAY_PADDING_ALL(16),
-            .childGap = 16 },
-        .backgroundColor = darkergray
-    };
-    constexpr Clay_ElementDeclaration timeContainer{
-        .layout = {
-            .sizing = growAll,
-            .childAlignment = centered }
-    };
-    constexpr Clay_ElementDeclaration progressBar{
-        .layout = {
-            .sizing = { .width = CLAY_SIZING_PERCENT(0.65f), .height = CLAY_SIZING_GROW() },
-            .childAlignment = centered }
-    };
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wnarrowing"
-    static constexpr auto MakeImageConfig = [](const Texture& tex) {
-        return Clay_ElementDeclaration{
-            .layout = {
-                .sizing = {
-                    .width = CLAY_SIZING_FIXED(tex.width),
-                    .height = CLAY_SIZING_FIXED(tex.height) } },
-            .image = {
-                .imageData = &const_cast<Texture&>(tex),
-                .sourceDimensions = { .width = tex.width, .height = tex.height } }
-        };
-    };
-#pragma GCC diagnostic pop
-    static constexpr auto MakeButton = [](Clay_ElementId id) {
-        return Clay_ElementDeclaration{
-            .id = id,
-            .layout = {
-                .sizing = { .width = CLAY_SIZING_GROW(), .height = CLAY_SIZING_FIT() },
-                .padding = CLAY_PADDING_ALL(16),
-                .childAlignment = centered },
-            .backgroundColor = lightgray,
-            .cornerRadius = rounding
-        };
-    };
-
-    LayoutInfo ret;
-    ret.hoveredSongId = -1;
-    ret.hoveredCollectionId = -1;
-
-    static auto MakeCollectionEntry = [&ret, &pool](int collectionIndex, const CollectionEntry& collection) {
-        const Texture& tex = pool.GetTexture(collection.uiName);
-        CLAY(MakeButton(CLAY_IDI("Collection", collectionIndex))) {
-            CLAY(MakeImageConfig(tex)) {}
-            if (Clay_Hovered())
-                ret.hoveredCollectionId = collection.id;
-        }
-    };
-
-    static auto MakeSongEntry = [&ret, &pool](int songIndex, const SongEntry& song) {
-        const Texture& tex = pool.GetTexture(song.uiName);
-        CLAY(MakeButton(CLAY_IDI("Song", songIndex))) {
-            CLAY(MakeImageConfig(tex)) {}
-            if (Clay_Hovered())
-                ret.hoveredSongId = song.id;
-        }
-    };
-
-    static constexpr auto MakeProgressBar = [](float currTime, float duration) {
-        constexpr Clay_Sizing fullBar{
-            .width = CLAY_SIZING_PERCENT(0.95f),
-            .height = CLAY_SIZING_FIXED(25)
-        };
-
-        currTime = currTime > duration ? duration : currTime;
-        const float progress = duration > 0.0f ? currTime / duration : 0.0f;
-        const Clay_Sizing partialBar{
-            .width = CLAY_SIZING_PERCENT(progress),
-            .height = CLAY_SIZING_GROW()
-        };
-
-        CLAY({ .layout = { .sizing = fullBar }, .backgroundColor = black }) {
-            CLAY({ .layout = { .sizing = partialBar }, .backgroundColor = white }) {}
-        }
-    };
-
-    Clay_BeginLayout();
-
-    CLAY(root) {
-        CLAY(navigation) {
-            CLAY(collectionView) {
-                for (int i = 0; i < collectionArena.top; i++)
-                    MakeCollectionEntry(i, collectionArena.arr[i]);
-            }
-            CLAY(songView) {
-                for (auto [i, songIndex] : std::views::enumerate(songs))
-                    MakeSongEntry(i, songArena.arr[songIndex]);
-            }
-        }
-        CLAY(nowPlaying) {
-            CLAY({ .layout = { .sizing = growAll, .childAlignment = centered, .layoutDirection = CLAY_TOP_TO_BOTTOM }}) {
-                CLAY_TEXT(CLAY_STRING("title"), CLAY_TEXT_CONFIG({}));
-                CLAY_TEXT(CLAY_STRING("artist"), CLAY_TEXT_CONFIG({}));
-                CLAY_TEXT(CLAY_STRING("album"), CLAY_TEXT_CONFIG({}));
-            }
-            CLAY(timeContainer) {
-                TimeFormat(state.currTime, playbackTime);
-                CLAY_TEXT(casts::clay::String(playbackTime), CLAY_TEXT_CONFIG({}));
-            }
-            CLAY(progressBar) {
-                MakeProgressBar(state.currTime, state.duration);
-            }
-            CLAY(timeContainer) {
-                TimeFormat(state.duration, trackLength);
-                CLAY_TEXT(casts::clay::String(trackLength), CLAY_TEXT_CONFIG({}));
-            }
-        }
-    }
-
-    ret.renderCommands = Clay_EndLayout();
-    return ret;
-}
 
 void LoadSong(PlaybackState& state, const SongEntry& song) {
     if (IsMusicValid(state.audioBuffer)) {
@@ -347,6 +49,14 @@ void ClayError(Clay_ErrorData errorData) {
 void LogSQLiteCallback(void*, int errCode, const char* msg) {
     std::printf("[SQLITE] %s: %s\n", sqlite3_errstr(errCode), msg);
 }
+
+std::string ToString(const unsigned char* str) {
+    return std::string(reinterpret_cast<const char*>(str));
+};
+
+int PrepareQuery(sqlite3* db, sqlite3_stmt** stmt, std::string_view query) {
+    return sqlite3_prepare_v2(db, query.data(), query.size() + 1, stmt, nullptr);
+}; 
 
 #define EXIT_ON_FT_ERR(err) if (err) { FTPrintError(err); return 1; }
 
@@ -421,27 +131,6 @@ int main() {
 
     Clay_SetMeasureTextFunction(MeasureText, &textCtx);
 
-    playbackTime.buffer = new char[10];
-    playbackTime.capacity = 10;
-    playbackTime.size = 0;
-
-    trackLength.buffer = new char[10];
-    trackLength.capacity = 10;
-    trackLength.size = 0;
-    
-    const auto stringBufferReleaser = Defer([](){
-        delete[] playbackTime.buffer;
-        delete[] trackLength.buffer;
-    });
-
-    static constexpr auto ToString = [](const unsigned char* str) {
-        return std::string(reinterpret_cast<const char*>(str));
-    };
-
-    static constexpr auto PrepareQuery = [](sqlite3* db, sqlite3_stmt** stmt, std::string_view query) {
-        return sqlite3_prepare_v2(db, query.data(), query.size() + 1, stmt, nullptr);
-    }; 
-
     UIStringPool pool;
 
     sqlite3_stmt* stmt;
@@ -460,10 +149,10 @@ int main() {
     sqlite3_finalize(stmt);
 
     for (const auto& [collId, collIndex] : collectionsById) {
-        // const std::string sizeQuery = std::format("SELECT count(*) FROM collections_contents INNER JOIN songs ON collections_contents.songId = songs.rowid WHERE collections_contents.collectionId = {};", collId);
-        const std::string contentQuery = std::format("SELECT songs.rowid, songs.* FROM collections_contents INNER JOIN songs ON collections_contents.songId = songs.rowid WHERE collections_contents.collectionId = {};", collId);
+        err = PrepareQuery(db, &stmt, "SELECT songs.rowid, songs.* FROM collections_contents INNER JOIN songs ON collections_contents.songId = songs.rowid WHERE collections_contents.collectionId = ?;");
+        if (err != SQLITE_OK) return 1;
 
-        err = PrepareQuery(db, &stmt, contentQuery);
+        err = sqlite3_bind_int64(stmt, 1, collId);
         if (err != SQLITE_OK) return 1;
 
         songsByCollection.emplace(collId, std::vector<int>());
@@ -546,6 +235,7 @@ int main() {
         BeginDrawing();
         ClearBackground(BLACK);
         RenderFrame(layoutInfo.renderCommands, textCtx);
+        DrawTextureEx(textCtx.atlas.RaylibTexture(), {0, 0}, 0, 1, WHITE);
         EndDrawing();
     }
 

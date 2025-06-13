@@ -29,6 +29,7 @@ add_executable(riff-man
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/raqm/src/raqm.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Renderer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TextUtils.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Layout.cpp
 )
 target_compile_features(riff-man PRIVATE cxx_std_23)
 target_compile_options(riff-man PRIVATE
@@ -41,6 +42,7 @@ target_compile_options(riff-man PRIVATE
     -g
     -Wshadow
     #-DRIFF_MAN_DEBUG_FONTS
+    #-DRIFF_MAN_DEBUG_DEFER
 )
 target_include_directories(riff-man PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/raylib/src/
