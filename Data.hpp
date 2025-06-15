@@ -17,6 +17,7 @@ enum class AudioFormat {
 };
 
 using EntityId = long int;
+constexpr EntityId NO_ENTITY = -1;
 
 struct SongEntry {
     EntityId id;

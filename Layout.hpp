@@ -3,20 +3,23 @@
 #define CLAY_IMPLMENTATION
 #include <clay.h>
 
+#include <span>
 #include <vector>
 
 #include "Allocators.hpp"
 #include "Data.hpp"
 
-struct LayoutInfo {
-    Clay_RenderCommandArray renderCommands;
-    long hoveredSongId;
-    long hoveredCollectionId;
+struct LayoutInput {
+    int songIndex;
+    int collectionIndex;
 };
 
-LayoutInfo MakeLayout(const PlaybackState& state,
-                      Arena<SongEntry>& songArena,
-                      Arena<CollectionEntry>& collectionArena,
-                      const std::vector<int>& songs,
-                      const UIStringPool& pool);
+struct LayoutResult {
+    Clay_RenderCommandArray renderCommands;
+    LayoutInput input;
+};
 
+LayoutResult MakeLayout(const PlaybackState& state,
+                        std::span<const SongEntry> songs,
+                        std::span<const CollectionEntry> collections,
+                        const UIStringPool& pool);

@@ -60,15 +60,16 @@ int PrepareQuery(sqlite3* db, sqlite3_stmt** stmt, std::string_view query) {
 
 #define EXIT_ON_FT_ERR(err) if (err) { FTPrintError(err); return 1; }
 
-Arena<SongEntry> songArena;
-Arena<CollectionEntry> collectionArena;
+Arena<CollectionEntry> collections;
+Arena<SongEntry> collectionSongs;
 
-// maps entity ids to arena indices
-std::unordered_map<EntityId, int> songsById;
-std::unordered_map<EntityId, std::vector<int>> songsByCollection;
-std::unordered_map<EntityId, int> collectionsById;
+Arena<SongEntry> queueSongs;
 
 int main() {
+    collections.Reserve(1024);
+    collectionSongs.Reserve(512);
+    queueSongs.Reserve(512);
+    
     // Init Raylib
     // SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
     InitWindow(960, 540, "[Riff Man]");
@@ -138,42 +139,15 @@ int main() {
     if (err != SQLITE_OK) return 1;
 
     while ((err = sqlite3_step(stmt)) == SQLITE_ROW) {
-        int i = collectionArena.Allocate();
+        int i = collections.Allocate();
         EntityId id = sqlite3_column_int64(stmt, 0);
 
-        collectionArena.arr[i].id = id;
-        collectionArena.arr[i].uiName = pool.Register(sqlite3_column_text(stmt, 1), textCtx);
-        collectionsById.emplace(id, i);
+        collections.arr[i].id = id;
+        collections.arr[i].uiName = pool.Register(sqlite3_column_text(stmt, 1), textCtx);
     }
 
     sqlite3_finalize(stmt);
 
-    for (const auto& [collId, collIndex] : collectionsById) {
-        err = PrepareQuery(db, &stmt, "SELECT songs.rowid, songs.* FROM collections_contents INNER JOIN songs ON collections_contents.songId = songs.rowid WHERE collections_contents.collectionId = ?;");
-        if (err != SQLITE_OK) return 1;
-
-        err = sqlite3_bind_int64(stmt, 1, collId);
-        if (err != SQLITE_OK) return 1;
-
-        songsByCollection.emplace(collId, std::vector<int>());
-        while ((err = sqlite3_step(stmt)) == SQLITE_ROW) {
-            int i = songArena.Allocate();
-            // note that SQLite tables are 1-indexed
-            EntityId id = sqlite3_column_int64(stmt, 0);
-
-            songArena.arr[i].id = id;
-            songArena.arr[i].filename = ToString(sqlite3_column_text(stmt, 1));
-            songArena.arr[i].fileFormat = AudioFormat::MP3;  // TODO: bad
-            songArena.arr[i].uiName = pool.Register(sqlite3_column_text(stmt, 3), textCtx);
-            songArena.arr[i].uiByArtist = pool.Register(sqlite3_column_text(stmt, 4), textCtx);
-
-            songsById.emplace(id, i);
-            songsByCollection[collId].push_back(i);
-        }
-
-        sqlite3_finalize(stmt);
-    }
-    
     PlaybackState state{
         .audioBuffer = {},
         .metadata = nullptr,
@@ -181,12 +155,17 @@ int main() {
         .currTime = 0.0f
     };
 
-    LayoutInfo layoutInfo;
-    layoutInfo.hoveredSongId = -1;
-    layoutInfo.hoveredCollectionId = -1;
+    LayoutInput inputNm0{
+        .songIndex = -1,
+        .collectionIndex = -1
+    };
+    LayoutInput inputNm1{
+        .songIndex = -1,
+        .collectionIndex = -1
+    };
 
-    const std::vector<int> emptySongList;
-    long int selectedCollection = -1;
+    int selectedCollectionIndex = -1;
+
     bool clayDebugEnabled = false;
 
     while (!WindowShouldClose()) {
@@ -210,13 +189,37 @@ int main() {
         Clay_UpdateScrollContainers(false, mouseWheelDelta, GetFrameTime());
         
         // Phase 2: application state updates
-        if (layoutInfo.hoveredCollectionId > -1 && IsMouseButtonReleased(0)) {
-            selectedCollection = layoutInfo.hoveredCollectionId;
-        }
+        // if (layoutInfo.hoveredSongId > -1 && IsMouseButtonReleased(0)) {
+        //     const int i = songsById[layoutInfo.hoveredSongId];
+        //     LoadSong(state, songArena.arr[i]);
+        // }
 
-        if (layoutInfo.hoveredSongId > -1 && IsMouseButtonReleased(0)) {
-            const int i = songsById[layoutInfo.hoveredSongId];
-            LoadSong(state, songArena.arr[i]);
+        if (IsMouseButtonReleased(0) &&
+                inputNm0.collectionIndex != -1 &&
+                inputNm0.collectionIndex != selectedCollectionIndex) {
+            selectedCollectionIndex = inputNm0.collectionIndex;
+            collectionSongs.Reset();
+            int collId = collections.arr[selectedCollectionIndex].id;
+
+            err = PrepareQuery(db, &stmt, "SELECT songs.rowid, songs.* FROM collections_contents INNER JOIN songs ON collections_contents.songId = songs.rowid WHERE collections_contents.collectionId = ?;");
+            if (err != SQLITE_OK) return 1;
+
+            err = sqlite3_bind_int64(stmt, 1, collId);
+            if (err != SQLITE_OK) return 1;
+
+            while ((err = sqlite3_step(stmt)) == SQLITE_ROW) {
+                int i = collectionSongs.Allocate();
+                // note that SQLite tables are 1-indexed
+                EntityId id = sqlite3_column_int64(stmt, 0);
+
+                collectionSongs.arr[i].id = id;
+                collectionSongs.arr[i].filename = ToString(sqlite3_column_text(stmt, 1));
+                collectionSongs.arr[i].fileFormat = AudioFormat::MP3;  // TODO: bad
+                collectionSongs.arr[i].uiName = pool.Register(sqlite3_column_text(stmt, 3), textCtx);
+                collectionSongs.arr[i].uiByArtist = pool.Register(sqlite3_column_text(stmt, 4), textCtx);
+            }
+
+            sqlite3_finalize(stmt);
         }
 
         if (IsMusicValid(state.audioBuffer)) {
@@ -228,14 +231,19 @@ int main() {
         // MakeLayout will implicitly update input state.
         // We consider this to be part of next frame's phase 1.
         Clay_SetLayoutDimensions(GetScreenDimensions());
-        const std::vector<int>& songList = selectedCollection != -1 ? songsByCollection[selectedCollection] : emptySongList;
-        layoutInfo = MakeLayout(state, songArena, collectionArena, songList, pool);
+        const LayoutResult layout = MakeLayout(state,
+                                               collectionSongs.Span(),
+                                               collections.Span(),
+                                               pool);
+
+        inputNm1 = inputNm0;
+        inputNm0 = layout.input;
 
         // Phase 4: render
         BeginDrawing();
         ClearBackground(BLACK);
-        RenderFrame(layoutInfo.renderCommands, textCtx);
-        DrawTextureEx(textCtx.atlas.RaylibTexture(), {0, 0}, 0, 1, WHITE);
+        RenderFrame(layout.renderCommands, textCtx);
+        // DrawTextureEx(textCtx.atlas.RaylibTexture(), {0, 0}, 0, 1, WHITE);
         EndDrawing();
     }
 

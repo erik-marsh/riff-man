@@ -168,37 +168,36 @@ bool MakeButton(const Texture& tex) {
     return hovered;
 }
 
-LayoutInfo MakeLayout(const PlaybackState& state,
-                      Arena<SongEntry>& songArena,
-                      Arena<CollectionEntry>& collectionArena,
-                      const std::vector<int>& songs,
-                      const UIStringPool& pool) {
+LayoutResult MakeLayout(const PlaybackState& state,
+                       std::span<const SongEntry> songs,
+                       std::span<const CollectionEntry> collections,
+                       const UIStringPool& pool) {
     stringArena.Reset();
 
-    LayoutInfo ret;
-    ret.hoveredSongId = -1;
-    ret.hoveredCollectionId = -1;
+    LayoutResult ret;
+    ret.input.songIndex = -1;
+    ret.input.collectionIndex = -1;
 
     Clay_BeginLayout();
 
     CLAY(root) {
         CLAY(navigation) {
             CLAY(collectionView) {
-                for (int i = 0; i < collectionArena.top; i++) {
-                    const auto& coll = collectionArena.arr[i];
+                for (int i = 0; i < collections.size(); i++) {
+                    const CollectionEntry& coll = collections[i];
                     const Texture& tex = pool.GetTexture(coll.uiName);
                     const bool hovered = MakeButton(tex);
                     if (hovered)
-                        ret.hoveredCollectionId = coll.id;
+                        ret.input.collectionIndex = i;
                 }
             }
             CLAY(songView) {
-                for (auto [i, songIndex] : std::views::enumerate(songs)) {
-                    const auto& song = songArena.arr[songIndex];
+                for (int i = 0; i < songs.size(); i++) {
+                    const SongEntry& song = songs[i];
                     const Texture& tex = pool.GetTexture(song.uiName);
                     const bool hovered = MakeButton(tex);
                     if (hovered)
-                        ret.hoveredSongId = song.id;
+                        ret.input.songIndex = i;
                 }
             }
         }
