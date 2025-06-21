@@ -51,9 +51,9 @@ void LogSQLiteCallback(void*, int errCode, const char* msg) {
     std::printf("[SQLITE] %s: %s\n", sqlite3_errstr(errCode), msg);
 }
 
-std::string ToString(const unsigned char* str) {
-    return std::string(reinterpret_cast<const char*>(str));
-};
+std::string ColumnString(sqlite3_stmt* stmt, int col) {
+    return std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, col)));
+}
 
 int PrepareQuery(sqlite3* db, sqlite3_stmt** stmt, std::string_view query) {
     return sqlite3_prepare_v2(db, query.data(), query.size() + 1, stmt, nullptr);
@@ -144,8 +144,7 @@ int main() {
         EntityId id = sqlite3_column_int64(stmt, 0);
 
         collections.arr[i].id = id;
-        const std::string str = ToString(sqlite3_column_text(stmt, 1));
-        collections.arr[i].name = str;
+        collections.arr[i].name = ColumnString(stmt, 1);
     }
 
     sqlite3_finalize(stmt);
@@ -210,12 +209,10 @@ int main() {
                 EntityId id = sqlite3_column_int64(stmt, 0);
 
                 collectionSongs.arr[i].id = id;
-                collectionSongs.arr[i].filename = ToString(sqlite3_column_text(stmt, 1));
-                collectionSongs.arr[i].fileFormat = AudioFormat::MP3;  // TODO: bad
-                auto tmp = ToString(sqlite3_column_text(stmt, 3));
-                collectionSongs.arr[i].name = tmp;
-                tmp = ToString(sqlite3_column_text(stmt, 4));
-                collectionSongs.arr[i].byArtist = tmp;
+                collectionSongs.arr[i].filename = ColumnString(stmt, 1);
+                collectionSongs.arr[i].fileFormat = AudioFormat::MP3;           // TODO: bad
+                collectionSongs.arr[i].name = ColumnString(stmt, 3);
+                collectionSongs.arr[i].byArtist = ColumnString(stmt, 4);
             }
 
             sqlite3_finalize(stmt);

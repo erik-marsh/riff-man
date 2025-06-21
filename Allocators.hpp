@@ -14,7 +14,8 @@ struct Arena {
     int top = 0;
 
     void Reserve(size_t cap) {
-        arr = static_cast<T*>(std::malloc(cap * sizeof(T)));
+        // arr = static_cast<T*>(std::malloc(cap * sizeof(T)));
+        arr = new T[cap];
         capacity = cap;
     }
 
