@@ -93,7 +93,7 @@ int TGAImage::OffsetOf(int x, int y) const {
     return (4 * y * width) + (4 * x) + 18;
 }
 
-Texture RenderText(std::string_view str, const TextRenderContext& textCtx,
+TGAImage RenderText(std::string_view str, const TextRenderContext& textCtx,
                    const char* langHint) {
     // TODO: we could add some introspection here to detect text language
     //       i think harfbuzz can do that directly
@@ -180,10 +180,11 @@ Texture RenderText(std::string_view str, const TextRenderContext& textCtx,
         penX += glyphs[i].x_advance >> 6;
     }
 
-    Image image = LoadImageFromMemory(".tga", bmpOut.buffer.data(), bmpOut.buffer.size());
-    Texture texture = LoadTextureFromImage(image);
-    UnloadImage(image);
-    return texture;
+    // Image image = LoadImageFromMemory(".tga", bmpOut.buffer.data(), bmpOut.buffer.size());
+    // Texture texture = LoadTextureFromImage(image);
+    // UnloadImage(image);
+    // return texture;
+    return bmpOut;
 }
 
 

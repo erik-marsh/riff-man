@@ -14,17 +14,18 @@
 void FTPrintError(int error);
 
 struct TGAImage {
+    TGAImage() = default;
     TGAImage(int width, int height);
 
     int OffsetOf(int x, int y) const;
 
     std::vector<uint8_t> buffer;
-    unsigned int width;
-    unsigned int height;
+    int width;
+    int height;
 };
 
 struct TextRenderContext;
-Texture RenderText(std::string_view str, const TextRenderContext& textCtx,
+TGAImage RenderText(std::string_view str, const TextRenderContext& textCtx,
                    const char* langHint = nullptr);
 
 class ASCIIAtlas {

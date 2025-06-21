@@ -19,7 +19,9 @@ struct LayoutResult {
     LayoutInput input;
 };
 
+void InitLayoutArenas(int nChars, int nCustom);
+
+struct TextRenderContext;
 LayoutResult MakeLayout(const PlaybackState& state,
                         std::span<const SongEntry> songs,
-                        std::span<const CollectionEntry> collections,
-                        const UIStringPool& pool);
+                        std::span<const CollectionEntry> collections);

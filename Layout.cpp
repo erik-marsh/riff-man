@@ -3,16 +3,31 @@
 #include <cassert>
 #include <format>
 #include <ranges>
+#include <unordered_map>
 
+#include "Allocators.hpp"
+#include "Casts.hpp"
+#include "LayoutElements.hpp"
+#include "TextUtils.hpp"
+
+// This works a lot differently than my other allocators
+// I'm making a lot of strong assumptions in the other
+// TODO: figure out better allocation strategies
 struct StringArena {
-    static constexpr int arrSize = 1024;
-    char arr[arrSize];
+    char* arr;
+    int capacity = 0;
     int top = 0;
 
+    void Reserve(size_t cap) {
+        arr = static_cast<char*>(std::malloc(cap));
+        capacity = cap;
+    }
+
     char* Allocate(int size) {
+        assert(arr && "No buffer allocated for StringArena");
         char* start = &arr[top];
         top += size;
-        assert((top < arrSize) && "Overallocation in StringArena");
+        assert((top < capacity) && "Overallocation in StringArena");
         return start;
     }
 
@@ -21,7 +36,15 @@ struct StringArena {
     }
 };
 
-StringArena stringArena;
+StringArena g_stringArena;
+Arena<CustomElement> g_customArena;
+
+std::unordered_map<std::string, TGAImage> g_renderedTextCache;
+
+void InitLayoutArenas(int nChars, int nCustom) {
+    g_stringArena.Reserve(nChars);
+    g_customArena.Reserve(nCustom);
+}
 
 namespace colors {
     constexpr Clay_Color white     { 255, 255, 255, 255 };
@@ -80,6 +103,12 @@ constexpr Clay_ElementDeclaration nowPlaying{
         .childGap = 16 },
     .backgroundColor = colors::darkergray
 };
+constexpr Clay_ElementDeclaration trackInfo{
+    .layout = {
+        .sizing = growAll,
+        .childAlignment = centered,
+        .layoutDirection = CLAY_TOP_TO_BOTTOM }
+};
 constexpr Clay_ElementDeclaration timeContainer{
     .layout = {
         .sizing = growAll,
@@ -132,7 +161,7 @@ Clay_String MakeTimeString(float seconds) {
     const int hh = mm / 60;
 
     constexpr int cap = 10;
-    char* str = stringArena.Allocate(cap);
+    char* str = g_stringArena.Allocate(cap);
 
     std::format_to_n_result<char*> res;
     if (hh == 0)
@@ -147,8 +176,9 @@ Clay_String MakeTimeString(float seconds) {
     };
 };
 
-Clay_ElementDeclaration MakeButtonConfig() {
-    return {
+// Returns if the button is hovered or not.
+bool MakeButton(std::string_view str) {
+    constexpr Clay_ElementDeclaration buttonFrame{
         .layout = {
             .sizing = { .width = CLAY_SIZING_GROW(), .height = CLAY_SIZING_FIT() },
             .padding = CLAY_PADDING_ALL(16),
@@ -156,23 +186,33 @@ Clay_ElementDeclaration MakeButtonConfig() {
         .backgroundColor = colors::lightgray,
         .cornerRadius = rounding
     };
-};
 
-// Returns if the button is hovered or not.
-bool MakeButton(const Texture& tex) {
     bool hovered = false;
-    CLAY(MakeButtonConfig()) {
-        CLAY(MakeImageConfig(tex)) {}
+    CLAY(buttonFrame) {
+        CLAY_TEXT(casts::clay::String(str), CLAY_TEXT_CONFIG({}));
         hovered = Clay_Hovered();
     }
     return hovered;
 }
 
+// ugly disgusting wokraround for how i draw utf8 text to a single texture buffer.
+// that text gets rendered after all other render commands, and therefore
+// will render over everything else. this will likely be replaced if i need
+// to actually have floating containers.
+Clay_ElementDeclaration AppendUTF8Scissor(const Clay_ElementDeclaration& decl) {
+    int i = g_customArena.Allocate();
+    g_customArena.arr[i].type = CustomElement::Type::UTF8_TEXT_SCISSOR;
+
+    Clay_ElementDeclaration ret = decl;
+    ret.custom = { .customData = reinterpret_cast<void*>(&g_customArena.arr[i]) };
+    return ret;
+}
+
 LayoutResult MakeLayout(const PlaybackState& state,
-                       std::span<const SongEntry> songs,
-                       std::span<const CollectionEntry> collections,
-                       const UIStringPool& pool) {
-    stringArena.Reset();
+                        std::span<const SongEntry> songs,
+                        std::span<const CollectionEntry> collections) {
+    g_stringArena.Reset();
+    g_customArena.Reset();
 
     LayoutResult ret;
     ret.input.songIndex = -1;
@@ -182,33 +222,30 @@ LayoutResult MakeLayout(const PlaybackState& state,
 
     CLAY(root) {
         CLAY(navigation) {
-            CLAY(collectionView) {
-                for (int i = 0; i < collections.size(); i++) {
-                    const CollectionEntry& coll = collections[i];
-                    const Texture& tex = pool.GetTexture(coll.uiName);
-                    const bool hovered = MakeButton(tex);
-                    if (hovered)
-                        ret.input.collectionIndex = i;
+            CLAY(AppendUTF8Scissor(collectionView)) {
+                for (const auto& [i, coll] : std::views::enumerate(collections)) {
+                    CLAY({}) {
+                        bool hovered = MakeButton(coll.name);
+                        if (hovered)
+                            ret.input.collectionIndex = i;
+                    }
                 }
             }
-            CLAY(songView) {
-                for (int i = 0; i < songs.size(); i++) {
-                    const SongEntry& song = songs[i];
-                    const Texture& tex = pool.GetTexture(song.uiName);
-                    const bool hovered = MakeButton(tex);
-                    if (hovered)
-                        ret.input.songIndex = i;
+            CLAY(AppendUTF8Scissor(songView)) {
+                for (const auto& [i, song] : std::views::enumerate(songs)) {
+                    CLAY({}) {
+                        bool hovered = MakeButton(song.name);
+                        if (hovered)
+                            ret.input.songIndex = i;
+                    }
                 }
             }
         }
         CLAY(nowPlaying) {
-            CLAY({ .layout = { .sizing = growAll, .childAlignment = centered, .layoutDirection = CLAY_TOP_TO_BOTTOM }}) {
+            CLAY(AppendUTF8Scissor(trackInfo)) {
                 if (state.metadata) {
-                    const Texture& title = pool.GetTexture(state.metadata->uiName);
-                    const Texture& artist = pool.GetTexture(state.metadata->uiByArtist);
-
-                    CLAY(MakeImageConfig(title)) {}
-                    CLAY(MakeImageConfig(artist)) {}
+                    CLAY_TEXT(casts::clay::String(state.metadata->name), CLAY_TEXT_CONFIG({}));
+                    CLAY_TEXT(casts::clay::String(state.metadata->byArtist), CLAY_TEXT_CONFIG({}));
                     CLAY_TEXT(CLAY_STRING("album"), CLAY_TEXT_CONFIG({}));
                 }
             }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <string>
 
 // Ignores a warning thrown by some clay internal workings that are irrelevant here

@@ -6,6 +6,7 @@
 #include FT_FREETYPE_H
 
 #include <cstdio>
+#include <cstring>
 #include <cmath>
 #include <string>
 #include <string_view>
@@ -62,13 +63,13 @@ int PrepareQuery(sqlite3* db, sqlite3_stmt** stmt, std::string_view query) {
 
 Arena<CollectionEntry> collections;
 Arena<SongEntry> collectionSongs;
-
 Arena<SongEntry> queueSongs;
 
 int main() {
     collections.Reserve(1024);
     collectionSongs.Reserve(512);
     queueSongs.Reserve(512);
+    InitLayoutArenas(1024, 256);
     
     // Init Raylib
     // SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
@@ -79,10 +80,12 @@ int main() {
         CloseAudioDevice();
         CloseWindow();
     });
+    
+    InitRenderer(GetScreenWidth(), GetScreenHeight());
 
     // Init Clay
     const uint64_t clayArenaSize = Clay_MinMemorySize();
-    Clay_Arena clayArena = Clay_CreateArenaWithCapacityAndMemory(clayArenaSize, malloc(clayArenaSize));
+    Clay_Arena clayArena = Clay_CreateArenaWithCapacityAndMemory(clayArenaSize, std::malloc(clayArenaSize));
     Clay_ErrorHandler clayErr{
         .errorHandlerFunction = ClayError,
         .userData = nullptr
@@ -132,8 +135,6 @@ int main() {
 
     Clay_SetMeasureTextFunction(MeasureText, &textCtx);
 
-    UIStringPool pool;
-
     sqlite3_stmt* stmt;
     err = PrepareQuery(db, &stmt, "SELECT rowid, * FROM collections;");
     if (err != SQLITE_OK) return 1;
@@ -143,7 +144,8 @@ int main() {
         EntityId id = sqlite3_column_int64(stmt, 0);
 
         collections.arr[i].id = id;
-        collections.arr[i].uiName = pool.Register(sqlite3_column_text(stmt, 1), textCtx);
+        const std::string str = ToString(sqlite3_column_text(stmt, 1));
+        collections.arr[i].name = str;
     }
 
     sqlite3_finalize(stmt);
@@ -165,7 +167,7 @@ int main() {
     };
 
     int selectedCollectionIndex = -1;
-
+    int selectedSongIndex = -1;
     bool clayDebugEnabled = false;
 
     while (!WindowShouldClose()) {
@@ -189,11 +191,6 @@ int main() {
         Clay_UpdateScrollContainers(false, mouseWheelDelta, GetFrameTime());
         
         // Phase 2: application state updates
-        // if (layoutInfo.hoveredSongId > -1 && IsMouseButtonReleased(0)) {
-        //     const int i = songsById[layoutInfo.hoveredSongId];
-        //     LoadSong(state, songArena.arr[i]);
-        // }
-
         if (IsMouseButtonReleased(0) &&
                 inputNm0.collectionIndex != -1 &&
                 inputNm0.collectionIndex != selectedCollectionIndex) {
@@ -215,11 +212,27 @@ int main() {
                 collectionSongs.arr[i].id = id;
                 collectionSongs.arr[i].filename = ToString(sqlite3_column_text(stmt, 1));
                 collectionSongs.arr[i].fileFormat = AudioFormat::MP3;  // TODO: bad
-                collectionSongs.arr[i].uiName = pool.Register(sqlite3_column_text(stmt, 3), textCtx);
-                collectionSongs.arr[i].uiByArtist = pool.Register(sqlite3_column_text(stmt, 4), textCtx);
+                auto tmp = ToString(sqlite3_column_text(stmt, 3));
+                collectionSongs.arr[i].name = tmp;
+                tmp = ToString(sqlite3_column_text(stmt, 4));
+                collectionSongs.arr[i].byArtist = tmp;
             }
 
             sqlite3_finalize(stmt);
+        }
+
+        if (IsMouseButtonReleased(0) &&
+                inputNm0.songIndex != -1 &&
+                inputNm0.songIndex != selectedSongIndex) {
+            selectedSongIndex = inputNm0.songIndex;
+            // TODO: proper queue needed
+            queueSongs.Reset();
+            int i = queueSongs.Allocate();
+
+            // this copy is STRICTLY NECESSARY
+            queueSongs.arr[i] = collectionSongs.arr[selectedSongIndex];
+
+            LoadSong(state, queueSongs.arr[i]);
         }
 
         if (IsMusicValid(state.audioBuffer)) {
@@ -233,8 +246,7 @@ int main() {
         Clay_SetLayoutDimensions(GetScreenDimensions());
         const LayoutResult layout = MakeLayout(state,
                                                collectionSongs.Span(),
-                                               collections.Span(),
-                                               pool);
+                                               collections.Span());
 
         inputNm1 = inputNm0;
         inputNm0 = layout.input;
@@ -243,7 +255,6 @@ int main() {
         BeginDrawing();
         ClearBackground(BLACK);
         RenderFrame(layout.renderCommands, textCtx);
-        // DrawTextureEx(textCtx.atlas.RaylibTexture(), {0, 0}, 0, 1, WHITE);
         EndDrawing();
     }
 

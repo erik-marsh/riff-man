@@ -13,7 +13,8 @@
 
 #include "TextUtils.hpp"
 
-void RenderFrame(Clay_RenderCommandArray cmds, TextRenderContext& textCtx);
-
+void InitRenderer(int screenWidth, int screenHeight);
 // userData should be a pointer to TextRenderContext
 Clay_Dimensions MeasureText(Clay_StringSlice text, Clay_TextElementConfig* config, void* userData);
+void RenderFrame(Clay_RenderCommandArray cmds, TextRenderContext& textCtx);
+
